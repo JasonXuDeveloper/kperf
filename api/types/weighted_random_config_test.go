@@ -333,3 +333,68 @@ spec:
 
 	assert.NoError(t, target.Validate())
 }
+
+func TestLoadProfileWeightedRandomUnmarshalFromYAML_LegacyFormat(t *testing.T) {
+	// Test backward compatibility with legacy format (no mode field)
+	in := `
+version: 1
+description: legacy format test
+spec:
+  rate: 50
+  total: 5000
+  duration: 120
+  conns: 4
+  client: 2
+  contentType: json
+  requests:
+  - staleGet:
+      group: core
+      version: v1
+      resource: pods
+      namespace: default
+      name: test-pod
+    shares: 50
+  - quorumList:
+      group: core
+      version: v1
+      resource: configmaps
+      namespace: default
+      limit: 100
+    shares: 100
+`
+
+	target := LoadProfile{}
+	require.NoError(t, yaml.Unmarshal([]byte(in), &target))
+
+	assert.Equal(t, 1, target.Version)
+	assert.Equal(t, "legacy format test", target.Description)
+	assert.Equal(t, 4, target.Spec.Conns)
+	assert.Equal(t, 2, target.Spec.Client)
+
+	// Should auto-migrate to weighted-random mode
+	assert.Equal(t, ModeWeightedRandom, target.Spec.Mode)
+
+	wrConfig, ok := target.Spec.ModeConfig.(*WeightedRandomConfig)
+	require.True(t, ok, "ModeConfig should be *WeightedRandomConfig for legacy format")
+	require.NotNil(t, wrConfig)
+
+	// Verify legacy fields are migrated
+	assert.Equal(t, float64(50), wrConfig.Rate)
+	assert.Equal(t, 5000, wrConfig.Total)
+	assert.Equal(t, 120, wrConfig.Duration)
+	assert.Len(t, wrConfig.Requests, 2)
+
+	assert.Equal(t, 50, wrConfig.Requests[0].Shares)
+	assert.NotNil(t, wrConfig.Requests[0].StaleGet)
+	assert.Equal(t, "pods", wrConfig.Requests[0].StaleGet.Resource)
+	assert.Equal(t, "v1", wrConfig.Requests[0].StaleGet.Version)
+	assert.Equal(t, "default", wrConfig.Requests[0].StaleGet.Namespace)
+	assert.Equal(t, "test-pod", wrConfig.Requests[0].StaleGet.Name)
+
+	assert.Equal(t, 100, wrConfig.Requests[1].Shares)
+	assert.NotNil(t, wrConfig.Requests[1].QuorumList)
+	assert.Equal(t, "configmaps", wrConfig.Requests[1].QuorumList.Resource)
+	assert.Equal(t, 100, wrConfig.Requests[1].QuorumList.Limit)
+
+	assert.NoError(t, target.Validate())
+}

@@ -222,6 +222,7 @@ func (lp LoadProfile) Validate() error {
 
 // UnmarshalYAML implements custom YAML unmarshaling for LoadProfileSpec.
 // It automatically deserializes ModeConfig to the correct concrete type based on Mode.
+// It also provides backward compatibility for legacy format (without mode field).
 func (spec *LoadProfileSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	// Create a temporary struct that has all fields explicitly (no embedding)
 	type tempSpec struct {
@@ -232,6 +233,12 @@ func (spec *LoadProfileSpec) UnmarshalYAML(unmarshal func(interface{}) error) er
 		MaxRetries   int                        `yaml:"maxRetries"`
 		Mode         ExecutionMode              `yaml:"mode"`
 		ModeConfig   map[string]interface{}     `yaml:"modeConfig"`
+
+		// Legacy fields (for backward compatibility)
+		Rate         float64                    `yaml:"rate"`
+		Total        int                        `yaml:"total"`
+		Duration     int                        `yaml:"duration"`
+		Requests     []*WeightedRequest         `yaml:"requests"`
 	}
 
 	temp := &tempSpec{}
@@ -245,6 +252,21 @@ func (spec *LoadProfileSpec) UnmarshalYAML(unmarshal func(interface{}) error) er
 	spec.ContentType = temp.ContentType
 	spec.DisableHTTP2 = temp.DisableHTTP2
 	spec.MaxRetries = temp.MaxRetries
+
+	// Check if this is legacy format (no mode specified but has requests)
+	if temp.Mode == "" && len(temp.Requests) > 0 {
+		// Auto-migrate legacy format to weighted-random mode
+		spec.Mode = ModeWeightedRandom
+		spec.ModeConfig = &WeightedRandomConfig{
+			Rate:     temp.Rate,
+			Total:    temp.Total,
+			Duration: temp.Duration,
+			Requests: temp.Requests,
+		}
+		return nil
+	}
+
+	// New format: mode is specified
 	spec.Mode = temp.Mode
 
 	// Now unmarshal ModeConfig based on Mode
