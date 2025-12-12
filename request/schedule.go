@@ -6,15 +6,15 @@ package request
 import (
 	"context"
 	"errors"
-	"math"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Azure/kperf/api/types"
 	"github.com/Azure/kperf/metrics"
+	"github.com/Azure/kperf/request/executor"
 
 	"golang.org/x/net/http2"
-	"golang.org/x/time/rate"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 )
@@ -30,33 +30,40 @@ type Result struct {
 	Total int
 }
 
-// Schedule files requests to apiserver based on LoadProfileSpec.
+// Schedule executes requests to apiserver based on LoadProfileSpec using the executor pattern.
 func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.Interface) (*Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	rndReqs, err := NewWeightedRandomRequests(spec)
+	// Create executor for the specified mode
+	exec, err := executor.CreateExecutor(spec)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create executor: %v", err)
 	}
+	defer exec.Stop()
 
-	qps := spec.Rate
-	if qps == 0 {
-		qps = float64(math.MaxInt32)
-	}
-	limiter := rate.NewLimiter(rate.Limit(qps), 1)
+	// Get metadata for logging
+	metadata := exec.Metadata()
 
+	// Start executor in background
+	reqBuilderCh := exec.Chan()
+	go func() {
+		if err := exec.Run(ctx); err != nil && err != context.Canceled {
+			klog.Errorf("Executor error: %v", err)
+			cancel()
+		}
+	}()
+
+	// Worker pool
 	clients := spec.Client
 	if clients == 0 {
 		clients = spec.Conns
 	}
 
-	reqBuilderCh := rndReqs.Chan()
+	respMetric := metrics.NewResponseMetric()
 	var wg sync.WaitGroup
 
-	respMetric := metrics.NewResponseMetric()
 	for i := 0; i < clients; i++ {
-		// reuse connection if clients > conns
 		cli := restCli[i%len(restCli)]
 		wg.Add(1)
 		go func(cli rest.Interface) {
@@ -64,12 +71,6 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 
 			for builder := range reqBuilderCh {
 				req := builder.Build(cli)
-
-				if err := limiter.Wait(ctx); err != nil {
-					klog.V(5).Infof("Rate limiter wait failed: %v", err)
-					cancel()
-					return
-				}
 
 				klog.V(5).Infof("Request URL: %s", req.URL())
 
@@ -114,27 +115,22 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 		}(cli)
 	}
 
-	klog.V(2).InfoS("Setting",
+	klog.V(2).InfoS("Schedule started",
+		"mode", spec.Mode,
 		"clients", clients,
 		"connections", len(restCli),
-		"rate", qps,
-		"total", spec.Total,
-		"duration", spec.Duration,
+		"expectedTotal", metadata.ExpectedTotal,
+		"expectedDuration", metadata.ExpectedDuration,
 		"http2", !spec.DisableHTTP2,
 		"content-type", spec.ContentType,
 	)
 
 	start := time.Now()
 
-	if spec.Duration > 0 {
-		// If duration is set, we will run for duration.
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(spec.Duration)*time.Second)
-		defer cancel()
-	}
-	rndReqs.Run(ctx, spec.Total)
+	// Wait for completion
+	<-ctx.Done()
 
-	rndReqs.Stop()
+	exec.Stop()
 	wg.Wait()
 
 	totalDuration := time.Since(start)
@@ -142,7 +138,7 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 	return &Result{
 		ResponseStats: responseStats,
 		Duration:      totalDuration,
-		Total:         spec.Total,
+		Total:         metadata.ExpectedTotal,
 	}, nil
 }
 

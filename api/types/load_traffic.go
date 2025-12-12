@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"gopkg.in/yaml.v2"
 )
 
 // ContentType represents the format of response.
@@ -31,6 +32,26 @@ func (ct ContentType) Validate() error {
 	}
 }
 
+// ExecutionMode represents the execution strategy for generating requests.
+type ExecutionMode string
+
+const (
+	// ModeWeightedRandom generates requests randomly based on weighted distribution.
+	ModeWeightedRandom ExecutionMode = "weighted-random"
+	// ModeTimeSeries replays requests from time-bucketed audit logs.
+	ModeTimeSeries ExecutionMode = "time-series"
+)
+
+// Validate returns error if ExecutionMode is not supported.
+func (em ExecutionMode) Validate() error {
+	switch em {
+	case ModeWeightedRandom, ModeTimeSeries:
+		return nil
+	default:
+		return fmt.Errorf("unsupported execution mode: %s", em)
+	}
+}
+
 // LoadProfile defines how to create load traffic from one host to kube-apiserver.
 type LoadProfile struct {
 	// Version defines the version of this object.
@@ -41,14 +62,8 @@ type LoadProfile struct {
 	Spec LoadProfileSpec `json:"spec" yaml:"spec"`
 }
 
-// LoadProfileSpec defines the load traffic for traget resource.
+// LoadProfileSpec defines the load traffic for target resource.
 type LoadProfileSpec struct {
-	// Rate defines the maximum requests per second (zero is no limit).
-	Rate float64 `json:"rate" yaml:"rate"`
-	// Total defines the total number of requests.
-	Total int `json:"total" yaml:"total"`
-	// Duration defines the running time in seconds.
-	Duration int `json:"duration" yaml:"duration"`
 	// Conns defines total number of long connections used for traffic.
 	Conns int `json:"conns" yaml:"conns"`
 	// Client defines total number of HTTP clients.
@@ -61,9 +76,12 @@ type LoadProfileSpec struct {
 	// retrying upon receiving "Retry-After" headers and 429 status-code
 	// in the response (<= 0 means no retry).
 	MaxRetries int `json:"maxRetries" yaml:"maxRetries"`
-	// Requests defines the different kinds of requests with weights.
-	// The executor should randomly pick by weight.
-	Requests []*WeightedRequest `json:"requests" yaml:"requests"`
+
+	// Mode defines the execution strategy (weighted-random, time-series, etc.).
+	Mode ExecutionMode `json:"mode" yaml:"mode"`
+	// ModeConfig contains mode-specific configuration.
+	// This is automatically deserialized to the correct type based on Mode.
+	ModeConfig ModeConfig `json:"modeConfig" yaml:"modeConfig"`
 }
 
 // KubeGroupVersionResource identifies the resource URI.
@@ -120,7 +138,7 @@ type RequestList struct {
 	// Limit defines the page size.
 	Limit int `json:"limit" yaml:"limit"`
 	// Selector defines how to identify a set of objects.
-	Selector string `json:"seletor" yaml:"seletor"`
+	Selector string `json:"selector" yaml:"selector"`
 	// FieldSelector defines how to identify a set of objects with field selector.
 	FieldSelector string `json:"fieldSelector" yaml:"fieldSelector"`
 }
@@ -193,6 +211,7 @@ type RequestPostDel struct {
 	DeleteRatio              float64 `json:"deleteRatio" yaml:"deleteRatio"`
 }
 
+// WeightedRandomConfig defines configuration for weighted-random execution mode.
 // Validate verifies fields of LoadProfile.
 func (lp LoadProfile) Validate() error {
 	if lp.Version != 1 {
@@ -201,34 +220,84 @@ func (lp LoadProfile) Validate() error {
 	return lp.Spec.Validate()
 }
 
+// UnmarshalYAML implements custom YAML unmarshaling for LoadProfileSpec.
+// It automatically deserializes ModeConfig to the correct concrete type based on Mode.
+func (spec *LoadProfileSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	// Create a temporary struct that has all fields explicitly (no embedding)
+	type tempSpec struct {
+		Conns        int                        `yaml:"conns"`
+		Client       int                        `yaml:"client"`
+		ContentType  ContentType                `yaml:"contentType"`
+		DisableHTTP2 bool                       `yaml:"disableHTTP2"`
+		MaxRetries   int                        `yaml:"maxRetries"`
+		Mode         ExecutionMode              `yaml:"mode"`
+		ModeConfig   map[string]interface{}     `yaml:"modeConfig"`
+	}
+
+	temp := &tempSpec{}
+	if err := unmarshal(temp); err != nil {
+		return err
+	}
+
+	// Copy common fields
+	spec.Conns = temp.Conns
+	spec.Client = temp.Client
+	spec.ContentType = temp.ContentType
+	spec.DisableHTTP2 = temp.DisableHTTP2
+	spec.MaxRetries = temp.MaxRetries
+	spec.Mode = temp.Mode
+
+	// Now unmarshal ModeConfig based on Mode
+	if temp.ModeConfig != nil {
+		var config ModeConfig
+		switch temp.Mode {
+		case ModeWeightedRandom:
+			config = &WeightedRandomConfig{}
+		case ModeTimeSeries:
+			config = &TimeSeriesConfig{}
+		default:
+			return fmt.Errorf("unknown mode: %s", temp.Mode)
+		}
+
+		// Convert map to YAML bytes and unmarshal into typed struct
+		data, err := yaml.Marshal(temp.ModeConfig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal modeConfig: %w", err)
+		}
+		if err := yaml.Unmarshal(data, config); err != nil {
+			return fmt.Errorf("failed to unmarshal modeConfig for mode %s: %w", temp.Mode, err)
+		}
+		spec.ModeConfig = config
+	}
+
+	return nil
+}
+
+
 // Validate verifies fields of LoadProfileSpec.
-func (spec LoadProfileSpec) Validate() error {
+func (spec *LoadProfileSpec) Validate() error {
+
+	// Validate common fields
 	if spec.Conns <= 0 {
 		return fmt.Errorf("conns requires > 0: %v", spec.Conns)
-	}
-
-	if spec.Rate < 0 {
-		return fmt.Errorf("rate requires >= 0: %v", spec.Rate)
-	}
-
-	if spec.Total <= 0 && spec.Duration <= 0 {
-		return fmt.Errorf("total requires > 0: %v or duration > 0s: %v", spec.Total, spec.Duration)
 	}
 
 	if spec.Client <= 0 {
 		return fmt.Errorf("client requires > 0: %v", spec.Client)
 	}
 
-	err := spec.ContentType.Validate()
-	if err != nil {
+	if err := spec.ContentType.Validate(); err != nil {
 		return err
 	}
 
-	for idx, req := range spec.Requests {
-		if err := req.Validate(); err != nil {
-			return fmt.Errorf("idx: %v request: %v", idx, err)
-		}
+	if err := spec.Mode.Validate(); err != nil {
+		return err
 	}
+
+	if spec.ModeConfig == nil {
+		return fmt.Errorf("modeConfig is required")
+	}
+
 	return nil
 }
 
