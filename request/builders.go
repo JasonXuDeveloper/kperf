@@ -11,12 +11,13 @@ import (
 )
 
 func init() {
-	// Register the request builder factory with the executor package
+	// Register the request builder factories with the executor package
 	executor.SetRequestBuilderFactory(CreateRequestBuilder)
+	executor.SetExactRequestBuilderFactory(CreateRequestBuilderFromExact)
 }
 
 // CreateRequestBuilder creates a RESTRequestBuilder from a WeightedRequest.
-// This function is used by executors to create request builders.
+// This function is used by weighted-random mode executors.
 func CreateRequestBuilder(r *types.WeightedRequest, maxRetries int) (executor.RESTRequestBuilder, error) {
 	var builder executor.RESTRequestBuilder
 	switch {
@@ -40,4 +41,77 @@ func CreateRequestBuilder(r *types.WeightedRequest, maxRetries int) (executor.RE
 		return nil, fmt.Errorf("unsupported request type")
 	}
 	return builder, nil
+}
+
+// CreateRequestBuilderFromExact creates a RESTRequestBuilder from an ExactRequest.
+// This function is used by time-series and other exact-replay mode executors.
+func CreateRequestBuilderFromExact(req *types.ExactRequest, maxRetries int) (executor.RESTRequestBuilder, error) {
+	resourceVersion := req.ResourceVersion
+
+	switch req.Method {
+	case "GET":
+		return newRequestGetBuilder(&types.RequestGet{
+			KubeGroupVersionResource: types.KubeGroupVersionResource{
+				Group:    req.Group,
+				Version:  req.Version,
+				Resource: req.Resource,
+			},
+			Namespace: req.Namespace,
+			Name:      req.Name,
+		}, resourceVersion, maxRetries), nil
+
+	case "LIST":
+		return newRequestListBuilder(&types.RequestList{
+			KubeGroupVersionResource: types.KubeGroupVersionResource{
+				Group:    req.Group,
+				Version:  req.Version,
+				Resource: req.Resource,
+			},
+			Namespace:     req.Namespace,
+			Limit:         req.Limit,
+			Selector:      req.LabelSelector,
+			FieldSelector: req.FieldSelector,
+		}, resourceVersion, maxRetries), nil
+
+	case "PATCH":
+		patchType, ok := types.GetPatchType(req.PatchType)
+		if !ok {
+			return nil, fmt.Errorf("invalid patch type: %s", req.PatchType)
+		}
+		return newRequestPatchBuilder(&types.RequestPatch{
+			KubeGroupVersionResource: types.KubeGroupVersionResource{
+				Group:    req.Group,
+				Version:  req.Version,
+				Resource: req.Resource,
+			},
+			Namespace: req.Namespace,
+			Name:      req.Name,
+			Body:      req.Body,
+			PatchType: string(patchType),
+		}, resourceVersion, maxRetries), nil
+
+	case "POST":
+		return newRequestPostDelBuilder(&types.RequestPostDel{
+			KubeGroupVersionResource: types.KubeGroupVersionResource{
+				Group:    req.Group,
+				Version:  req.Version,
+				Resource: req.Resource,
+			},
+			Namespace: req.Namespace,
+		}, resourceVersion, maxRetries), nil
+
+	case "DELETE":
+		return newRequestPostDelBuilder(&types.RequestPostDel{
+			KubeGroupVersionResource: types.KubeGroupVersionResource{
+				Group:    req.Group,
+				Version:  req.Version,
+				Resource: req.Resource,
+			},
+			Namespace:   req.Namespace,
+			DeleteRatio: 1.0,
+		}, resourceVersion, maxRetries), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported method: %s", req.Method)
+	}
 }

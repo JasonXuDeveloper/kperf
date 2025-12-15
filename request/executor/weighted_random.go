@@ -16,12 +16,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// requestBuilderFactory is a function type for creating request builders.
-// This is injected to avoid import cycles.
-type requestBuilderFactory func(*types.WeightedRequest, int) (RESTRequestBuilder, error)
-
-var createRequestBuilderFunc requestBuilderFactory
-
 // WeightedRandomExecutor implements Executor for weighted-random mode.
 // It generates requests randomly based on weighted distribution.
 type WeightedRandomExecutor struct {
@@ -175,10 +169,4 @@ func (e *WeightedRandomExecutor) GetExecutionContext(baseCtx context.Context) (c
 		return context.WithTimeout(baseCtx, time.Duration(e.config.Duration)*time.Second)
 	}
 	return context.WithCancel(baseCtx)
-}
-
-// SetRequestBuilderFactory sets the factory function for creating request builders.
-// This is called by the request package during initialization to avoid import cycles.
-func SetRequestBuilderFactory(factory requestBuilderFactory) {
-	createRequestBuilderFunc = factory
 }

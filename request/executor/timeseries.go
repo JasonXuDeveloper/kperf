@@ -135,77 +135,12 @@ func (e *TimeSeriesExecutor) Metadata() ExecutorMetadata {
 }
 
 // createBuilderForExactRequest creates a request builder from an ExactRequest.
-// This function needs access to the request builder factory.
 func (e *TimeSeriesExecutor) createBuilderForExactRequest(req *types.ExactRequest) RESTRequestBuilder {
-	if createRequestBuilderFunc == nil {
+	if createExactRequestBuilderFunc == nil {
 		return nil
 	}
 
-	// Convert ExactRequest to WeightedRequest for the factory
-	weightedReq := &types.WeightedRequest{
-		Shares: 1,
-	}
-
-	// Map ExactRequest to appropriate WeightedRequest field based on method
-	switch req.Method {
-	case "GET":
-		weightedReq.QuorumGet = &types.RequestGet{
-			KubeGroupVersionResource: types.KubeGroupVersionResource{
-				Group:    req.Group,
-				Version:  req.Version,
-				Resource: req.Resource,
-			},
-			Namespace: req.Namespace,
-			Name:      req.Name,
-		}
-	case "LIST":
-		weightedReq.QuorumList = &types.RequestList{
-			KubeGroupVersionResource: types.KubeGroupVersionResource{
-				Group:    req.Group,
-				Version:  req.Version,
-				Resource: req.Resource,
-			},
-			Namespace:     req.Namespace,
-			Selector:      req.LabelSelector,
-			FieldSelector: req.FieldSelector,
-		}
-	case "PATCH":
-		patchType, _ := types.GetPatchType(req.PatchType)
-		weightedReq.Patch = &types.RequestPatch{
-			KubeGroupVersionResource: types.KubeGroupVersionResource{
-				Group:    req.Group,
-				Version:  req.Version,
-				Resource: req.Resource,
-			},
-			Namespace: req.Namespace,
-			Name:      req.Name,
-			Body:      req.Body,
-			PatchType: string(patchType),
-		}
-	case "POST":
-		weightedReq.PostDel = &types.RequestPostDel{
-			KubeGroupVersionResource: types.KubeGroupVersionResource{
-				Group:    req.Group,
-				Version:  req.Version,
-				Resource: req.Resource,
-			},
-			Namespace: req.Namespace,
-		}
-	case "DELETE":
-		weightedReq.PostDel = &types.RequestPostDel{
-			KubeGroupVersionResource: types.KubeGroupVersionResource{
-				Group:    req.Group,
-				Version:  req.Version,
-				Resource: req.Resource,
-			},
-			Namespace:   req.Namespace,
-			DeleteRatio: 1.0,
-		}
-	default:
-		return nil
-	}
-
-	builder, err := createRequestBuilderFunc(weightedReq, e.spec.MaxRetries)
+	builder, err := createExactRequestBuilderFunc(req, e.spec.MaxRetries)
 	if err != nil {
 		return nil
 	}

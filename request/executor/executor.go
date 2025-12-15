@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Azure/kperf/api/types"
 	"k8s.io/client-go/rest"
 )
 
@@ -78,4 +79,25 @@ type ExecutorMetadata struct {
 	//   - Time-series: {"bucket_count": 1800, "interval": "1s"}
 	//   - Poisson: {"lambda": 50, "distribution": "poisson"}
 	Custom map[string]interface{}
+}
+
+// requestBuilderFactory is a function type for creating request builders from WeightedRequest.
+type requestBuilderFactory func(*types.WeightedRequest, int) (RESTRequestBuilder, error)
+
+// exactRequestBuilderFactory is a function type for creating request builders from ExactRequest.
+type exactRequestBuilderFactory func(*types.ExactRequest, int) (RESTRequestBuilder, error)
+
+var createRequestBuilderFunc requestBuilderFactory
+var createExactRequestBuilderFunc exactRequestBuilderFactory
+
+// SetRequestBuilderFactory sets the factory function for creating request builders from WeightedRequest.
+// This is called by the request package during initialization to avoid import cycles.
+func SetRequestBuilderFactory(factory requestBuilderFactory) {
+	createRequestBuilderFunc = factory
+}
+
+// SetExactRequestBuilderFactory sets the factory function for creating request builders from ExactRequest.
+// This is called by the request package during initialization to avoid import cycles.
+func SetExactRequestBuilderFactory(factory exactRequestBuilderFactory) {
+	createExactRequestBuilderFunc = factory
 }
