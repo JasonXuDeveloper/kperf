@@ -53,7 +53,7 @@ func NewTimeSeriesExecutor(spec *types.LoadProfileSpec) (Executor, error) {
 		spec:         spec,
 		interval:     interval,
 		buckets:      config.Buckets,
-		reqBuilderCh: make(chan RESTRequestBuilder, 1000),
+		reqBuilderCh: make(chan RESTRequestBuilder),
 		ctx:          ctx,
 		cancel:       cancel,
 	}, nil
@@ -66,8 +66,8 @@ func (e *TimeSeriesExecutor) Chan() <-chan RESTRequestBuilder {
 
 // Run starts the executor and begins replaying requests.
 func (e *TimeSeriesExecutor) Run(ctx context.Context) error {
-	defer e.wg.Done()
 	e.wg.Add(1)
+	defer e.wg.Done()
 
 	startTime := time.Now()
 
@@ -210,4 +210,14 @@ func (e *TimeSeriesExecutor) createBuilderForExactRequest(req *types.ExactReques
 		return nil
 	}
 	return builder
+}
+
+// GetRateLimiter returns nil because time-series mode handles timing internally.
+func (e *TimeSeriesExecutor) GetRateLimiter() RateLimiter {
+	return nil
+}
+
+// GetExecutionContext returns a simple cancellable context (no duration timeout).
+func (e *TimeSeriesExecutor) GetExecutionContext(baseCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(baseCtx)
 }

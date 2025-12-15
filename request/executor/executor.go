@@ -46,6 +46,21 @@ type Executor interface {
 	// Metadata returns information about this executor.
 	// Used for logging and metrics.
 	Metadata() ExecutorMetadata
+
+	// GetRateLimiter returns a rate limiter if this mode requires rate limiting at the worker level.
+	// Returns nil if no rate limiting is needed (e.g., time-series mode handles timing internally).
+	GetRateLimiter() RateLimiter
+
+	// GetExecutionContext returns a context that includes mode-specific timeouts (e.g., duration).
+	// The returned context is derived from the base context and should be used for execution.
+	GetExecutionContext(baseCtx context.Context) (context.Context, context.CancelFunc)
+}
+
+// RateLimiter is an interface for rate limiting.
+// This allows executors to provide custom rate limiting strategies.
+type RateLimiter interface {
+	// Wait blocks until the limiter permits an event to happen.
+	Wait(ctx context.Context) error
 }
 
 // ExecutorMetadata contains information about an executor's expected behavior.

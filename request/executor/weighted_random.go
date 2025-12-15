@@ -23,7 +23,7 @@ type requestBuilderFactory func(*types.WeightedRequest, int) (RESTRequestBuilder
 var createRequestBuilderFunc requestBuilderFactory
 
 // WeightedRandomExecutor implements Executor for weighted-random mode.
-// It generates requests randomly based on weighted distribution with rate limiting.
+// It generates requests randomly based on weighted distribution.
 type WeightedRandomExecutor struct {
 	config       *types.WeightedRandomConfig
 	spec         *types.LoadProfileSpec
@@ -95,18 +95,15 @@ func (e *WeightedRandomExecutor) Chan() <-chan RESTRequestBuilder {
 
 // Run starts the executor and begins generating requests.
 func (e *WeightedRandomExecutor) Run(ctx context.Context) error {
-	defer e.wg.Done()
 	e.wg.Add(1)
+	defer e.wg.Done()
 
 	total := e.config.Total
 	sum := 0
+
 	for {
 		if total > 0 && sum >= total {
 			break
-		}
-
-		if err := e.limiter.Wait(ctx); err != nil {
-			return err
 		}
 
 		builder := e.randomPick()
@@ -165,6 +162,19 @@ func (e *WeightedRandomExecutor) randomPick() RESTRequestBuilder {
 		rnd -= s
 	}
 	panic("unreachable")
+}
+
+// GetRateLimiter returns the rate limiter for worker-level rate limiting.
+func (e *WeightedRandomExecutor) GetRateLimiter() RateLimiter {
+	return e.limiter
+}
+
+// GetExecutionContext returns a context with duration timeout if configured.
+func (e *WeightedRandomExecutor) GetExecutionContext(baseCtx context.Context) (context.Context, context.CancelFunc) {
+	if e.config.Duration > 0 {
+		return context.WithTimeout(baseCtx, time.Duration(e.config.Duration)*time.Second)
+	}
+	return context.WithCancel(baseCtx)
 }
 
 // SetRequestBuilderFactory sets the factory function for creating request builders.

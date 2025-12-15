@@ -45,16 +45,14 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 	// Get metadata for logging
 	metadata := exec.Metadata()
 
-	// Start executor in background
-	reqBuilderCh := exec.Chan()
-	go func() {
-		if err := exec.Run(ctx); err != nil && err != context.Canceled {
-			klog.Errorf("Executor error: %v", err)
-			cancel()
-		}
-	}()
+	// Get execution context with mode-specific timeouts
+	execCtx, execCancel := exec.GetExecutionContext(ctx)
+	defer execCancel()
 
-	// Worker pool
+	// Get rate limiter (nil if mode doesn't need it)
+	limiter := exec.GetRateLimiter()
+
+	// Worker pool - start workers BEFORE executor to avoid unbuffered channel deadlock
 	clients := spec.Client
 	if clients == 0 {
 		clients = spec.Conns
@@ -63,13 +61,27 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 	respMetric := metrics.NewResponseMetric()
 	var wg sync.WaitGroup
 
+	reqBuilderCh := exec.Chan()
 	for i := 0; i < clients; i++ {
 		cli := restCli[i%len(restCli)]
 		wg.Add(1)
-		go func(cli rest.Interface) {
+		go func(workerID int, cli rest.Interface) {
 			defer wg.Done()
 
+			klog.V(5).Infof("Worker %d started, waiting for requests", workerID)
+			requestCount := 0
+
 			for builder := range reqBuilderCh {
+				// Apply rate limiting (if configured)
+				if limiter != nil {
+					if err := limiter.Wait(ctx); err != nil {
+						klog.V(5).Infof("Worker %d: Rate limiter wait failed: %v", workerID, err)
+						return
+					}
+				}
+
+				requestCount++
+				klog.V(8).Infof("Worker %d received request #%d", workerID, requestCount)
 				req := builder.Build(cli)
 
 				klog.V(5).Infof("Request URL: %s", req.URL())
@@ -112,13 +124,19 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 					respMetric.ObserveLatency(req.Method(), req.MaskedURL().String(), latency)
 				}()
 			}
-		}(cli)
+
+			klog.V(5).Infof("Worker %d finished: processed %d requests", workerID, requestCount)
+		}(i, cli)
 	}
+
+	// Extract rate from metadata for logging (mode-specific)
+	rate, _ := metadata.Custom["rate"].(float64)
 
 	klog.V(2).InfoS("Schedule started",
 		"mode", spec.Mode,
 		"clients", clients,
 		"connections", len(restCli),
+		"rate", rate,
 		"expectedTotal", metadata.ExpectedTotal,
 		"expectedDuration", metadata.ExpectedDuration,
 		"http2", !spec.DisableHTTP2,
@@ -126,6 +144,15 @@ func Schedule(ctx context.Context, spec *types.LoadProfileSpec, restCli []rest.I
 	)
 
 	start := time.Now()
+
+	// Start executor AFTER workers are ready to receive
+	go func() {
+		if err := exec.Run(execCtx); err != nil && err != context.Canceled {
+			klog.Errorf("Executor error: %v", err)
+		}
+		// Signal completion (success or failure)
+		cancel()
+	}()
 
 	// Wait for completion
 	<-ctx.Done()
