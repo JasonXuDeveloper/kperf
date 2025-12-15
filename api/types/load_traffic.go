@@ -295,6 +295,81 @@ func (spec *LoadProfileSpec) UnmarshalYAML(unmarshal func(interface{}) error) er
 	return nil
 }
 
+// UnmarshalJSON implements custom JSON unmarshaling for LoadProfileSpec.
+// It automatically deserializes ModeConfig to the correct concrete type based on Mode.
+// It also provides backward compatibility for legacy format (without mode field).
+func (spec *LoadProfileSpec) UnmarshalJSON(data []byte) error {
+	// Create a temporary struct that has all fields explicitly (no embedding)
+	type tempSpec struct {
+		Conns        int                        `json:"conns"`
+		Client       int                        `json:"client"`
+		ContentType  ContentType                `json:"contentType"`
+		DisableHTTP2 bool                       `json:"disableHTTP2"`
+		MaxRetries   int                        `json:"maxRetries"`
+		Mode         ExecutionMode              `json:"mode"`
+		ModeConfig   map[string]interface{}     `json:"modeConfig"`
+
+		// Legacy fields (for backward compatibility)
+		Rate         float64                    `json:"rate"`
+		Total        int                        `json:"total"`
+		Duration     int                        `json:"duration"`
+		Requests     []*WeightedRequest         `json:"requests"`
+	}
+
+	temp := &tempSpec{}
+	if err := json.Unmarshal(data, temp); err != nil {
+		return err
+	}
+
+	// Copy common fields
+	spec.Conns = temp.Conns
+	spec.Client = temp.Client
+	spec.ContentType = temp.ContentType
+	spec.DisableHTTP2 = temp.DisableHTTP2
+	spec.MaxRetries = temp.MaxRetries
+
+	// Check if this is legacy format (no mode specified but has requests)
+	if temp.Mode == "" && len(temp.Requests) > 0 {
+		// Auto-migrate legacy format to weighted-random mode
+		spec.Mode = ModeWeightedRandom
+		spec.ModeConfig = &WeightedRandomConfig{
+			Rate:     temp.Rate,
+			Total:    temp.Total,
+			Duration: temp.Duration,
+			Requests: temp.Requests,
+		}
+		return nil
+	}
+
+	// New format: mode is specified
+	spec.Mode = temp.Mode
+
+	// Now unmarshal ModeConfig based on Mode
+	if temp.ModeConfig != nil {
+		var config ModeConfig
+		switch temp.Mode {
+		case ModeWeightedRandom:
+			config = &WeightedRandomConfig{}
+		case ModeTimeSeries:
+			config = &TimeSeriesConfig{}
+		default:
+			return fmt.Errorf("unknown mode: %s", temp.Mode)
+		}
+
+		// Convert map to JSON bytes and unmarshal into typed struct
+		configData, err := json.Marshal(temp.ModeConfig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal modeConfig: %w", err)
+		}
+		if err := json.Unmarshal(configData, config); err != nil {
+			return fmt.Errorf("failed to unmarshal modeConfig for mode %s: %w", temp.Mode, err)
+		}
+		spec.ModeConfig = config
+	}
+
+	return nil
+}
+
 
 // Validate verifies fields of LoadProfileSpec.
 func (spec *LoadProfileSpec) Validate() error {

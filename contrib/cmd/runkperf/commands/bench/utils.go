@@ -151,10 +151,12 @@ func newLoadProfileFromEmbed(cliCtx *cli.Context, name string) (_name string, _s
 				return fmt.Errorf("invalid total-requests value: %v", reqs)
 			}
 			// Apply CLI overrides automatically
-			overrides := types.BuildOverridesFromCLI(spec.Profile.Spec.ModeConfig, cliCtx)
-			if len(overrides) > 0 {
-				if err := spec.Profile.Spec.ModeConfig.ApplyOverrides(overrides); err != nil {
-					return fmt.Errorf("failed to apply config overrides: %w", err)
+			if spec != nil && spec.Profile.Spec.ModeConfig != nil {
+				overrides := types.BuildOverridesFromCLI(spec.Profile.Spec.ModeConfig, cliCtx)
+				if len(overrides) > 0 {
+					if err := spec.Profile.Spec.ModeConfig.ApplyOverrides(overrides); err != nil {
+						return fmt.Errorf("failed to apply config overrides: %w", err)
+					}
 				}
 			}
 
