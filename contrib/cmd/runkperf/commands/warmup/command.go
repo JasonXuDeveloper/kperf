@@ -86,6 +86,16 @@ var Command = cli.Command{
 		rgCfgFile, rgCfgFileDone, err := utils.NewRunnerGroupSpecFileFromEmbed(
 			"loadprofile/warmup.yaml",
 			func(spec *types.RunnerGroupSpec) error {
+				// Validate single spec for CLI overrides
+				if len(spec.Profile.Specs) > 1 {
+					return fmt.Errorf("CLI flag overrides are not allowed when config has multiple specs")
+				}
+				if len(spec.Profile.Specs) == 0 {
+					return fmt.Errorf("no specs found in load profile")
+				}
+
+				firstSpec := &spec.Profile.Specs[0]
+
 				reqs := cliCtx.Int("total")
 				if reqs < 0 {
 					return fmt.Errorf("invalid total value: %v", reqs)
@@ -102,8 +112,8 @@ var Command = cli.Command{
 					return fmt.Errorf("failed to parse %s affinity: %w", rgAffinity, err)
 				}
 
-				spec.Profile.Specs[0].Total = reqs
-				spec.Profile.Specs[0].Rate = rate
+				firstSpec.Total = reqs
+				firstSpec.Rate = rate
 
 				spec.NodeAffinity = affinityLabels
 

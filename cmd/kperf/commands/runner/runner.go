@@ -145,27 +145,15 @@ var runCommand = cli.Command{
 
 		rawDataFlagIncluded := cliCtx.Bool("raw-data")
 
-		// Execute single or multiple specs
-		if len(profileCfg.Specs) == 1 {
-			// Single spec - existing behavior
-			stats, err := request.Schedule(context.TODO(), &profileCfg.Specs[0], restClis)
-			if err != nil {
-				return err
-			}
-			err = printResponseStats(f, rawDataFlagIncluded, stats)
-			if err != nil {
-				return fmt.Errorf("error while printing response stats: %w", err)
-			}
-		} else {
-			// Multi-spec - new behavior
-			perSpecResults, aggregated, err := executeSpecs(context.TODO(), profileCfg.Specs, restClis)
-			if err != nil {
-				return err
-			}
-			err = printMultiSpecResults(f, rawDataFlagIncluded, perSpecResults, aggregated)
-			if err != nil {
-				return fmt.Errorf("error while printing multi-spec results: %w", err)
-			}
+		// Execute all specs (handles both single and multiple specs uniformly)
+		perSpecResults, aggregated, err := executeSpecs(context.TODO(), profileCfg.Specs, restClis)
+		if err != nil {
+			return err
+		}
+
+		err = printMultiSpecResults(f, rawDataFlagIncluded, perSpecResults, aggregated)
+		if err != nil {
+			return fmt.Errorf("error while printing response stats: %w", err)
 		}
 
 		return nil
@@ -225,46 +213,6 @@ func loadConfig(cliCtx *cli.Context) (*types.LoadProfile, error) {
 		return nil, err
 	}
 	return &profileCfg, nil
-}
-
-// printResponseStats prints types.RunnerMetricReport into underlying file.
-func printResponseStats(f *os.File, rawDataFlagIncluded bool, stats *request.Result) error {
-	output := types.RunnerMetricReport{
-		Total:              stats.Total,
-		ErrorStats:         metrics.BuildErrorStatsGroupByType(stats.Errors),
-		Duration:           stats.Duration.String(),
-		TotalReceivedBytes: stats.TotalReceivedBytes,
-
-		PercentileLatenciesByURL: map[string][][2]float64{},
-	}
-
-	total := 0
-	for _, latencies := range stats.LatenciesByURL {
-		total += len(latencies)
-	}
-	latencies := make([]float64, 0, total)
-	for _, l := range stats.LatenciesByURL {
-		latencies = append(latencies, l...)
-	}
-	output.PercentileLatencies = metrics.BuildPercentileLatencies(latencies)
-
-	for u, l := range stats.LatenciesByURL {
-		output.PercentileLatenciesByURL[u] = metrics.BuildPercentileLatencies(l)
-	}
-
-	if rawDataFlagIncluded {
-		output.LatenciesByURL = stats.LatenciesByURL
-		output.Errors = stats.Errors
-	}
-
-	encoder := json.NewEncoder(f)
-	encoder.SetIndent("", "  ")
-
-	err := encoder.Encode(output)
-	if err != nil {
-		return fmt.Errorf("failed to encode json: %w", err)
-	}
-	return nil
 }
 
 // hasCliOverrides checks if any CLI override flags are set.

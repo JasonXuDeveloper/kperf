@@ -137,8 +137,6 @@ func deployVirtualNodepool(ctx context.Context, cliCtx *cli.Context, target stri
 	}, nil
 }
 
-func NewRunnerGroupSpecFromYamlFile() {}
-
 // newLoadProfileFromEmbed loads load profile from embed and tweaks that load
 // profile.
 func newLoadProfileFromEmbed(cliCtx *cli.Context, name string) (_name string, _spec *types.RunnerGroupSpec, _cleanup func() error, _err error) {
@@ -146,6 +144,16 @@ func newLoadProfileFromEmbed(cliCtx *cli.Context, name string) (_name string, _s
 	rgCfgFile, rgCfgFileDone, err := utils.NewRunnerGroupSpecFileFromEmbed(
 		name,
 		func(spec *types.RunnerGroupSpec) error {
+			// Validate single spec for CLI overrides
+			if len(spec.Profile.Specs) > 1 {
+				return fmt.Errorf("CLI flag overrides are not allowed when config has multiple specs")
+			}
+			if len(spec.Profile.Specs) == 0 {
+				return fmt.Errorf("no specs found in load profile")
+			}
+
+			firstSpec := &spec.Profile.Specs[0]
+
 			reqs := cliCtx.Int("total")
 			if reqs < 0 {
 				return fmt.Errorf("invalid total-requests value: %v", reqs)
@@ -153,7 +161,7 @@ func newLoadProfileFromEmbed(cliCtx *cli.Context, name string) (_name string, _s
 			reqsTime := cliCtx.Int("duration")
 			if !cliCtx.IsSet("total") && reqsTime > 0 {
 				reqs = 0
-				spec.Profile.Specs[0].Duration = reqsTime
+				firstSpec.Duration = reqsTime
 			}
 
 			rgAffinity := cliCtx.GlobalString("rg-affinity")
@@ -163,10 +171,10 @@ func newLoadProfileFromEmbed(cliCtx *cli.Context, name string) (_name string, _s
 			}
 
 			if reqs != 0 {
-				spec.Profile.Specs[0].Total = reqs
+				firstSpec.Total = reqs
 			}
 			spec.NodeAffinity = affinityLabels
-			spec.Profile.Specs[0].ContentType = types.ContentType(cliCtx.String("content-type"))
+			firstSpec.ContentType = types.ContentType(cliCtx.String("content-type"))
 
 			data, _ := yaml.Marshal(spec)
 
@@ -193,6 +201,16 @@ func newLoadProfileFromEmbed(cliCtx *cli.Context, name string) (_name string, _s
 }
 
 func tweakReadUpdateProfile(cliCtx *cli.Context, spec *types.RunnerGroupSpec) error {
+	// Validate single spec for CLI overrides
+	if len(spec.Profile.Specs) > 1 {
+		return fmt.Errorf("CLI flag overrides are not allowed when config has multiple specs")
+	}
+	if len(spec.Profile.Specs) == 0 {
+		return fmt.Errorf("no specs found in load profile")
+	}
+
+	firstSpec := &spec.Profile.Specs[0]
+
 	namePattern := cliCtx.String("read-update-name-pattern")
 	ratio := cliCtx.Float64("read-ratio")
 	if ratio <= 0 || ratio > 1 {
@@ -203,7 +221,7 @@ func tweakReadUpdateProfile(cliCtx *cli.Context, spec *types.RunnerGroupSpec) er
 	configmapTotal := cliCtx.Int("read-update-configmap-total")
 
 	if namePattern != "" || ratio != 0 || namespace != "" || configmapTotal > 0 {
-		for _, r := range spec.Profile.Specs[0].Requests {
+		for _, r := range firstSpec.Requests {
 			if r.Patch != nil {
 				if namePattern != "" {
 					r.Patch.Name = fmt.Sprintf("runkperf-cm-%s", namePattern)
