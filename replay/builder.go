@@ -37,6 +37,11 @@ func NewReplayRequester(req types.ReplayRequest, restCli rest.Interface, baseURL
 		apiPath = "/" + apiPath
 	}
 
+	// Fix malformed URLs: replace first & with ? if no ? is present
+	if !strings.Contains(apiPath, "?") && strings.Contains(apiPath, "&") {
+		apiPath = strings.Replace(apiPath, "&", "?", 1)
+	}
+
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	fullURL := baseURL + apiPath
 
@@ -98,8 +103,8 @@ func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 	// Build the request using rest.Interface (same pattern as existing kperf)
 	var req *rest.Request
 
-	// Parse path components from apiPath
-	pathParts := strings.Split(strings.Trim(r.apiPath, "/"), "/")
+	// Parse path components from URL path (without query string)
+	pathParts := strings.Split(strings.Trim(r.url.Path, "/"), "/")
 
 	switch r.verb {
 	case "GET", "LIST", "WATCH":
@@ -112,6 +117,10 @@ func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 		req = r.restCli.Post().AbsPath(pathParts...).Body(r.body)
 
 	case "DELETE":
+		req = r.restCli.Delete().AbsPath(pathParts...)
+
+	case "DELETECOLLECTION":
+		// DeleteCollection is a DELETE with collection-level path (e.g., /api/v1/namespaces/foo/pods)
 		req = r.restCli.Delete().AbsPath(pathParts...)
 
 	case "PATCH":
@@ -128,12 +137,14 @@ func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 		req = r.restCli.Get().AbsPath(pathParts...)
 	}
 
-	// Add label selector if present
-	if q := r.url.Query(); q.Get("labelSelector") != "" {
-		req = req.Param("labelSelector", q.Get("labelSelector"))
+	// Add all query parameters from the original URL
+	for key, values := range r.url.Query() {
+		for _, value := range values {
+			req = req.Param(key, value)
+		}
 	}
 
-	// Set timeout
+	// Set timeout (this may override timeout from query params, which is fine)
 	if r.timeout > 0 {
 		req = req.Timeout(r.timeout)
 	}

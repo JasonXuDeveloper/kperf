@@ -72,12 +72,17 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 	respMetric := metrics.NewResponseMetric()
 
 	var wg sync.WaitGroup
+	var watchWg sync.WaitGroup // Separate wait group for WATCH operations
 	sem := make(chan struct{}, r.maxConcurrency)
 
 	startTime := time.Now()
 	requestsRun := 0
 	requestsFailed := 0
 	var mu sync.Mutex
+
+	// Create a cancellable context for WATCH operations
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch() // Ensure WATCH operations are cancelled when we're done
 
 	for _, req := range r.requests {
 		// Check if context is cancelled
@@ -100,19 +105,38 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 			}
 		}
 
-		// Acquire semaphore slot
-		select {
-		case <-ctx.Done():
-			break
-		case sem <- struct{}{}:
+		// WATCH operations use separate wait group and context
+		isWatch := req.Verb == "WATCH"
+		if isWatch {
+			watchWg.Add(1)
+		} else {
+			wg.Add(1)
 		}
 
-		wg.Add(1)
-		go func(req types.ReplayRequest) {
-			defer wg.Done()
+		// Spawn goroutine immediately without blocking on semaphore
+		// The goroutine will acquire the semaphore when it starts
+		go func(req types.ReplayRequest, isWatch bool) {
+			if isWatch {
+				defer watchWg.Done()
+			} else {
+				defer wg.Done()
+			}
+
+			// Acquire semaphore slot inside goroutine (non-blocking main loop)
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+			}
 			defer func() { <-sem }()
 
-			err := r.executeRequest(ctx, req, respMetric)
+			// Use watchCtx for WATCH operations so they can be cancelled
+			execCtx := ctx
+			if isWatch {
+				execCtx = watchCtx
+			}
+
+			err := r.executeRequest(execCtx, req, respMetric)
 
 			mu.Lock()
 			requestsRun++
@@ -120,11 +144,17 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 				requestsFailed++
 			}
 			mu.Unlock()
-		}(req)
+		}(req, isWatch)
 	}
 
-	// Wait for all requests to complete
+	// Wait only for non-WATCH requests to complete
 	wg.Wait()
+
+	// Cancel all WATCH operations (they'll be cleaned up in background)
+	cancelWatch()
+
+	// Don't wait for WATCH operations - let them terminate via context cancellation
+	// The watchWg cleanup happens asynchronously
 
 	return &RunnerResult{
 		Total:          len(r.requests),

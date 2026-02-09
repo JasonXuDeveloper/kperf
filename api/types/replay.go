@@ -32,7 +32,7 @@ func (r ReplayRequest) Validate() error {
 	}
 
 	switch r.Verb {
-	case "CREATE", "GET", "LIST", "APPLY", "DELETE", "WATCH", "PATCH":
+	case "CREATE", "GET", "LIST", "APPLY", "DELETE", "DELETECOLLECTION", "WATCH", "PATCH":
 		// valid verbs
 	default:
 		return fmt.Errorf("unsupported verb: %s", r.Verb)
@@ -46,13 +46,15 @@ func (r ReplayRequest) Validate() error {
 		return fmt.Errorf("apiPath is required")
 	}
 
-	// Name is required for non-list operations
-	if r.Verb != "LIST" && r.Verb != "WATCH" && r.Name == "" {
+	// Name is required for specific operations (GET, DELETE, PATCH)
+	// CREATE, LIST, WATCH, DELETECOLLECTION, APPLY can have empty names
+	if (r.Verb == "GET" || r.Verb == "DELETE" || r.Verb == "PATCH") && r.Name == "" {
 		return fmt.Errorf("name is required for %s operation", r.Verb)
 	}
 
-	// Body is required for CREATE/APPLY/PATCH operations
-	if (r.Verb == "CREATE" || r.Verb == "APPLY" || r.Verb == "PATCH") && r.Body == "" {
+	// Body is required for APPLY/PATCH operations
+	// CREATE can have empty body if server generates defaults
+	if (r.Verb == "APPLY" || r.Verb == "PATCH") && r.Body == "" {
 		return fmt.Errorf("body is required for %s operation", r.Verb)
 	}
 
