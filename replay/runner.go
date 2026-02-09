@@ -371,6 +371,16 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.Replay
 	end := time.Now()
 	latency := end.Sub(start).Seconds()
 
+	// For WATCH operations, use connection establishment time instead of full stream duration
+	// This gives a meaningful latency metric (time to establish watch) rather than the
+	// duration of the long-lived connection which can be minutes
+	var reportLatency float64
+	if req.Verb == "WATCH" {
+		reportLatency = requester.ConnectionLatency()
+	} else {
+		reportLatency = latency
+	}
+
 	respMetric.ObserveReceivedBytes(bytes)
 
 	if err != nil {
@@ -378,7 +388,7 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.Replay
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// Context cancelled - treat as successful completion for WATCH operations
 			// This ensures cancelled WATCHes are counted in the total
-			respMetric.ObserveLatency(requester.Method(), requester.MaskedURL().String(), latency)
+			respMetric.ObserveLatency(requester.Method(), requester.MaskedURL().String(), reportLatency)
 			klog.V(5).Infof("Request cancelled (expected): %s %s", req.Verb, req.APIPath)
 			return nil
 		}
@@ -389,7 +399,7 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.Replay
 		return err
 	}
 
-	respMetric.ObserveLatency(requester.Method(), requester.MaskedURL().String(), latency)
+	respMetric.ObserveLatency(requester.Method(), requester.MaskedURL().String(), reportLatency)
 	return nil
 }
 

@@ -19,14 +19,15 @@ import (
 // ReplayRequester builds and executes replay requests using rest.Interface.
 // This is consistent with how existing kperf handles requests.
 type ReplayRequester struct {
-	method    string
-	verb      string
-	url       *url.URL
-	maskedURL *url.URL
-	body      []byte
-	timeout   time.Duration
-	restCli   rest.Interface
-	apiPath   string
+	method              string
+	verb                string
+	url                 *url.URL
+	maskedURL           *url.URL
+	body                []byte
+	timeout             time.Duration
+	restCli             rest.Interface
+	apiPath             string
+	connectionLatency   float64 // Time to establish connection (for WATCH)
 }
 
 // NewReplayRequester creates a new ReplayRequester from a ReplayRequest.
@@ -98,6 +99,13 @@ func (r *ReplayRequester) Timeout(timeout time.Duration) {
 	r.timeout = timeout
 }
 
+// ConnectionLatency returns the time to establish the connection.
+// For WATCH operations, this is the time until the first response is received.
+// For other operations, this equals the total latency.
+func (r *ReplayRequester) ConnectionLatency() float64 {
+	return r.connectionLatency
+}
+
 // Do executes the request and returns the bytes received.
 func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 	// Build the request using rest.Interface (same pattern as existing kperf)
@@ -150,7 +158,14 @@ func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 	}
 
 	// Execute and read response
+	// For WATCH operations, track connection establishment time separately
+	connectionStart := time.Now()
 	respBody, err := req.Stream(ctx)
+	connectionEstablished := time.Now()
+
+	// Store connection latency (time to get first response)
+	r.connectionLatency = connectionEstablished.Sub(connectionStart).Seconds()
+
 	if err != nil {
 		return 0, err
 	}
