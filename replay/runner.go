@@ -21,9 +21,11 @@ import (
 const defaultRequestTimeout = 60 * time.Second
 
 // timeBucket groups requests that should execute in the same time window.
+// Uses indices to avoid copying request data.
 type timeBucket struct {
-	timestamp int64                  // bucket start time in ms
-	requests  []types.ReplayRequest
+	timestamp int64  // bucket start time in ms
+	startIdx  int    // start index in requests slice
+	endIdx    int    // end index (exclusive) in requests slice
 }
 
 // workerMetrics holds per-worker statistics to avoid lock contention.
@@ -34,6 +36,7 @@ type workerMetrics struct {
 }
 
 // groupIntoTimeBuckets groups requests by time buckets to reduce timer overhead.
+// Returns buckets with indices to avoid copying request data.
 func groupIntoTimeBuckets(requests []types.ReplayRequest, bucketMs int64) []timeBucket {
 	if len(requests) == 0 {
 		return nil
@@ -42,24 +45,26 @@ func groupIntoTimeBuckets(requests []types.ReplayRequest, bucketMs int64) []time
 	buckets := make([]timeBucket, 0, len(requests)/100+1)
 	currentBucket := timeBucket{
 		timestamp: (requests[0].Timestamp / bucketMs) * bucketMs,
-		requests:  make([]types.ReplayRequest, 0, 100),
+		startIdx:  0,
+		endIdx:    0,
 	}
 
-	for _, req := range requests {
+	for i, req := range requests {
 		bucketTime := (req.Timestamp / bucketMs) * bucketMs
 		if bucketTime != currentBucket.timestamp {
+			currentBucket.endIdx = i
 			buckets = append(buckets, currentBucket)
 			currentBucket = timeBucket{
 				timestamp: bucketTime,
-				requests:  make([]types.ReplayRequest, 0, 100),
+				startIdx:  i,
+				endIdx:    i,
 			}
 		}
-		currentBucket.requests = append(currentBucket.requests, req)
 	}
 
-	if len(currentBucket.requests) > 0 {
-		buckets = append(buckets, currentBucket)
-	}
+	// Add final bucket
+	currentBucket.endIdx = len(requests)
+	buckets = append(buckets, currentBucket)
 
 	klog.V(3).InfoS("Grouped requests into time buckets",
 		"totalRequests", len(requests),
@@ -105,8 +110,8 @@ type Runner struct {
 	requests    []types.ReplayRequest
 	restClis    []rest.Interface // Changed from single to slice for round-robin
 	baseURL     string
-	workerCount int              // Renamed from maxConcurrency to clarify semantics
-	reqChan     chan types.ReplayRequest
+	workerCount int                              // Renamed from maxConcurrency to clarify semantics
+	reqChan     chan *types.ReplayRequest       // Use pointer to avoid copying
 }
 
 // NewRunner creates a new replay runner.
@@ -150,21 +155,39 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 		return &RunnerResult{}, nil
 	}
 
-	// Separate WATCH from normal requests
-	normalReqs := make([]types.ReplayRequest, 0, len(r.requests))
-	watchReqs := make([]types.ReplayRequest, 0)
-
-	for _, req := range r.requests {
-		if req.Verb == "WATCH" {
-			watchReqs = append(watchReqs, req)
+	// Separate WATCH from normal requests using indices to avoid copying
+	normalCount := 0
+	watchCount := 0
+	for i := range r.requests {
+		if r.requests[i].Verb == "WATCH" {
+			watchCount++
 		} else {
-			normalReqs = append(normalReqs, req)
+			normalCount++
+		}
+	}
+
+	// Pre-allocate with exact capacity
+	normalReqs := make([]*types.ReplayRequest, 0, normalCount)
+	watchReqs := make([]*types.ReplayRequest, 0, watchCount)
+
+	for i := range r.requests {
+		if r.requests[i].Verb == "WATCH" {
+			watchReqs = append(watchReqs, &r.requests[i])
+		} else {
+			normalReqs = append(normalReqs, &r.requests[i])
 		}
 	}
 
 	// Calculate optimal bucket size based on QPS
-	bucketMs := calculateBucketSize(normalReqs)
+	var bucketMs int64
 	if len(normalReqs) > 0 {
+		// Create temporary slice view for bucket calculation
+		tempReqs := make([]types.ReplayRequest, len(normalReqs))
+		for i, req := range normalReqs {
+			tempReqs[i] = *req
+		}
+		bucketMs = calculateBucketSize(tempReqs)
+
 		duration := normalReqs[len(normalReqs)-1].Timestamp
 		if duration > 0 {
 			qps := float64(len(normalReqs)) / (float64(duration) / 1000.0)
@@ -179,11 +202,8 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 		}
 	}
 
-	// Group normal requests into time buckets
-	buckets := groupIntoTimeBuckets(normalReqs, bucketMs)
-
-	// Create buffered channel (10x worker count for high QPS)
-	r.reqChan = make(chan types.ReplayRequest, r.workerCount*10)
+	// Create buffered channel (10x worker count for high QPS) - using pointers
+	r.reqChan = make(chan *types.ReplayRequest, r.workerCount*10)
 
 	// Initialize per-worker metrics
 	workers := make([]*workerMetrics, r.workerCount)
@@ -198,13 +218,13 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 
 	startTime := time.Now()
 
-	// Scheduler goroutine: dispatch requests by time buckets
+	// Scheduler goroutine: dispatch requests by direct slice iteration
 	go func() {
 		defer close(r.reqChan)
 
-		for _, bucket := range buckets {
-			// Wait for bucket time
-			scheduledTime := replayStart.Add(time.Duration(bucket.timestamp) * time.Millisecond)
+		for _, req := range normalReqs {
+			// Wait for scheduled time
+			scheduledTime := replayStart.Add(time.Duration(req.Timestamp) * time.Millisecond)
 			waitDuration := time.Until(scheduledTime)
 
 			if waitDuration > 0 {
@@ -217,14 +237,12 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 				}
 			}
 
-			// Dispatch all requests in this bucket
-			for _, req := range bucket.requests {
-				select {
-				case <-ctx.Done():
-					return
-				case r.reqChan <- req:
-					// Successfully dispatched
-				}
+			// Dispatch request pointer (no copy)
+			select {
+			case <-ctx.Done():
+				return
+			case r.reqChan <- req:
+				// Successfully dispatched
 			}
 		}
 	}()
@@ -236,7 +254,7 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 
 	for _, req := range watchReqs {
 		watchWg.Add(1)
-		go func(req types.ReplayRequest) {
+		go func(req *types.ReplayRequest) {
 			defer watchWg.Done()
 
 			// Wait for scheduled time
@@ -320,7 +338,7 @@ func (r *Runner) startWorkers(ctx context.Context, workers []*workerMetrics) *sy
 				default:
 				}
 
-				// Execute request with worker's dedicated connection
+				// Execute request with worker's dedicated connection (pointer, no copy)
 				err := r.executeRequestWithClient(ctx, req, restCli, wm.respMetric)
 
 				// Track metrics without locking (per-worker metrics)
@@ -336,8 +354,8 @@ func (r *Runner) startWorkers(ctx context.Context, workers []*workerMetrics) *sy
 }
 
 // executeRequestWithClient executes a single replay request with a specific client.
-func (r *Runner) executeRequestWithClient(ctx context.Context, req types.ReplayRequest, restCli rest.Interface, respMetric metrics.ResponseMetric) error {
-	requester, err := NewReplayRequester(req, restCli, r.baseURL)
+func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.ReplayRequest, restCli rest.Interface, respMetric metrics.ResponseMetric) error {
+	requester, err := NewReplayRequester(*req, restCli, r.baseURL)
 	if err != nil {
 		klog.V(5).Infof("Failed to create requester for %s %s: %v", req.Verb, req.APIPath, err)
 		return err
@@ -365,7 +383,7 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req types.ReplayR
 }
 
 // executeRequest executes a single replay request (deprecated, kept for compatibility).
-func (r *Runner) executeRequest(ctx context.Context, req types.ReplayRequest, respMetric metrics.ResponseMetric) error {
+func (r *Runner) executeRequest(ctx context.Context, req *types.ReplayRequest, respMetric metrics.ResponseMetric) error {
 	// Use first client for backward compatibility
 	if len(r.restClis) == 0 {
 		return fmt.Errorf("no REST clients available")

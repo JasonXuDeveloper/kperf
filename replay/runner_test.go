@@ -97,10 +97,10 @@ func TestGroupIntoTimeBuckets(t *testing.T) {
 				t.Errorf("groupIntoTimeBuckets() returned %d buckets, want %d", len(buckets), tt.want)
 			}
 
-			// Verify all requests are accounted for
+			// Verify all requests are accounted for using indices
 			totalReqs := 0
 			for _, bucket := range buckets {
-				totalReqs += len(bucket.requests)
+				totalReqs += bucket.endIdx - bucket.startIdx
 			}
 			if totalReqs != len(tt.requests) {
 				t.Errorf("groupIntoTimeBuckets() total requests = %d, want %d", totalReqs, len(tt.requests))
@@ -111,6 +111,14 @@ func TestGroupIntoTimeBuckets(t *testing.T) {
 				if buckets[i].timestamp <= buckets[i-1].timestamp {
 					t.Errorf("buckets not ordered: bucket[%d].timestamp=%d <= bucket[%d].timestamp=%d",
 						i, buckets[i].timestamp, i-1, buckets[i-1].timestamp)
+				}
+			}
+
+			// Verify indices are valid and non-overlapping
+			for i, bucket := range buckets {
+				if bucket.startIdx < 0 || bucket.endIdx > len(tt.requests) || bucket.startIdx > bucket.endIdx {
+					t.Errorf("bucket[%d] has invalid indices: startIdx=%d, endIdx=%d, len=%d",
+						i, bucket.startIdx, bucket.endIdx, len(tt.requests))
 				}
 			}
 		})
@@ -263,3 +271,39 @@ func TestNewRunner(t *testing.T) {
 	}
 }
 
+
+// BenchmarkGroupIntoTimeBuckets benchmarks the time bucket grouping with different request counts.
+func BenchmarkGroupIntoTimeBuckets(b *testing.B) {
+	// Create sample requests
+	makeRequests := func(count int) []types.ReplayRequest {
+		reqs := make([]types.ReplayRequest, count)
+		for i := range reqs {
+			reqs[i] = types.ReplayRequest{
+				Timestamp:    int64(i),
+				Verb:         "GET",
+				ResourceKind: "Pod",
+				APIPath:      "/api/v1/pods",
+			}
+		}
+		return reqs
+	}
+
+	benchmarks := []struct {
+		name  string
+		count int
+	}{
+		{"100_requests", 100},
+		{"1000_requests", 1000},
+		{"10000_requests", 10000},
+	}
+
+	for _, bm := range benchmarks {
+		requests := makeRequests(bm.count)
+		b.Run(bm.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = groupIntoTimeBuckets(requests, 10)
+			}
+		})
+	}
+}
