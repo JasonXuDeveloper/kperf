@@ -5,6 +5,7 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -373,6 +374,16 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.Replay
 	respMetric.ObserveReceivedBytes(bytes)
 
 	if err != nil {
+		// Check if error is due to context cancellation (expected for WATCH when replay ends)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Context cancelled - treat as successful completion for WATCH operations
+			// This ensures cancelled WATCHes are counted in the total
+			respMetric.ObserveLatency(requester.Method(), requester.MaskedURL().String(), latency)
+			klog.V(5).Infof("Request cancelled (expected): %s %s", req.Verb, req.APIPath)
+			return nil
+		}
+
+		// Real error - record failure
 		respMetric.ObserveFailure(requester.Method(), requester.MaskedURL().String(), end, latency, err)
 		klog.V(5).Infof("Request failed: %s %s: %v", req.Verb, req.APIPath, err)
 		return err
