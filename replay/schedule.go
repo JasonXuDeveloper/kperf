@@ -41,13 +41,6 @@ func Schedule(ctx context.Context, kubeconfigPath string, profile *types.ReplayP
 		return nil, fmt.Errorf("failed to build kubeconfig: %w", err)
 	}
 
-	runnerCount := profile.Spec.RunnerCount
-	klog.V(2).InfoS("Starting local replay",
-		"runnerCount", runnerCount,
-		"totalRequests", len(profile.Requests),
-		"duration", fmt.Sprintf("%dms", profile.Duration()),
-	)
-
 	// Create REST clients using the same method as existing kperf
 	// This handles auth, TLS, content negotiation properly
 	restClis, err := request.NewClients(kubeconfigPath,
@@ -59,6 +52,15 @@ func Schedule(ctx context.Context, kubeconfigPath string, profile *types.ReplayP
 		return nil, fmt.Errorf("failed to create REST clients: %w", err)
 	}
 
+	// Determine worker count per runner
+	// Default to ConnsPerRunner if ClientsPerRunner not specified (legacy behavior)
+	workersPerRunner := profile.Spec.ClientsPerRunner
+	if workersPerRunner <= 0 {
+		workersPerRunner = profile.Spec.ConnsPerRunner
+	}
+
+	runnerCount := profile.Spec.RunnerCount
+
 	// Partition requests across runners
 	runnerRequests := make([][]types.ReplayRequest, runnerCount)
 	for i := 0; i < runnerCount; i++ {
@@ -69,17 +71,36 @@ func Schedule(ctx context.Context, kubeconfigPath string, profile *types.ReplayP
 		)
 	}
 
-	// Create runners (reuse clients across runners)
+	// Validate configuration and provide warnings
+	validateAndWarnConfig(profile, runnerRequests)
+
+	// Log distribution analysis
+	if klog.V(2).Enabled() {
+		dist := AnalyzeDistribution(profile.Requests, runnerCount)
+		klog.V(2).InfoS("Request distribution analysis",
+			"imbalance%", dist["imbalance"],
+			"min", dist["min"],
+			"max", dist["max"],
+			"avg", dist["average"])
+	}
+
+	klog.V(2).InfoS("Starting local replay",
+		"runnerCount", runnerCount,
+		"connsPerRunner", len(restClis),
+		"workersPerRunner", workersPerRunner,
+		"totalRequests", len(profile.Requests),
+		"duration", fmt.Sprintf("%dms", profile.Duration()),
+	)
+
+	// Create runners (each runner gets ALL connections for round-robin)
 	runners := make([]*Runner, runnerCount)
 	for i := 0; i < runnerCount; i++ {
-		// Round-robin client assignment
-		cli := restClis[i%len(restClis)]
 		runners[i] = NewRunner(
 			i,
 			runnerRequests[i],
-			cli,
+			restClis,          // Pass ALL clients (not just one)
 			restConfig.Host,
-			profile.Spec.ClientsPerRunner,
+			workersPerRunner,  // Worker count (not semaphore limit)
 		)
 	}
 
@@ -134,22 +155,30 @@ func ScheduleSingleRunner(ctx context.Context, kubeconfigPath string, profile *t
 		return nil, fmt.Errorf("failed to create REST clients: %w", err)
 	}
 
+	// Determine worker count
+	workersPerRunner := profile.Spec.ClientsPerRunner
+	if workersPerRunner <= 0 {
+		workersPerRunner = profile.Spec.ConnsPerRunner
+	}
+
 	// Partition requests for this runner
 	requests := PartitionRequests(profile.Requests, profile.Spec.RunnerCount, runnerIndex)
 
 	klog.V(2).InfoS("Starting single runner",
 		"runnerIndex", runnerIndex,
 		"runnerCount", profile.Spec.RunnerCount,
+		"connections", len(restClis),
+		"workers", workersPerRunner,
 		"requests", len(requests),
 	)
 
-	// Use first client (all share same connection pool behavior)
+	// Create runner with all connections
 	runner := NewRunner(
 		runnerIndex,
 		requests,
-		restClis[0],
+		restClis,         // All connections
 		restConfig.Host,
-		profile.Spec.ClientsPerRunner,
+		workersPerRunner,
 	)
 
 	// Use current time as start (each pod will have slightly different start times)
@@ -205,4 +234,66 @@ func NewClientsForReplay(kubeconfigPath string, conns int, contentType types.Con
 		request.WithClientContentTypeOpt(contentType),
 		request.WithClientDisableHTTP2Opt(disableHTTP2),
 	)
+}
+
+// validateAndWarnConfig validates configuration and warns about potential issues.
+func validateAndWarnConfig(profile *types.ReplayProfile, runnerRequests [][]types.ReplayRequest) {
+	for i, reqs := range runnerRequests {
+		if len(reqs) == 0 {
+			continue
+		}
+
+		duration := float64(profile.Duration()) / 1000.0 // in seconds
+		qps := float64(len(reqs)) / duration
+
+		conns := profile.Spec.ConnsPerRunner
+		workers := profile.Spec.ClientsPerRunner
+		if workers == 0 {
+			workers = conns
+		}
+
+		// Warning: Too many connections
+		if conns > 50 {
+			klog.Warningf("Runner %d: ConnsPerRunner (%d) exceeds recommended maximum (50). "+
+				"This may overwhelm the API server. Consider increasing runnerCount instead.",
+				i, conns)
+		}
+
+		// Warning: Insufficient workers for QPS
+		recommendedWorkers := int(qps/10) + 10
+		if workers < recommendedWorkers {
+			klog.Warningf("Runner %d: ClientsPerRunner (%d) may be insufficient for QPS (%.0f). "+
+				"Recommend at least %d workers (3-4x connections).",
+				i, workers, qps, recommendedWorkers)
+		}
+
+		// Warning: Too few connections for QPS
+		recommendedConns := int(qps/100) + 5
+		if recommendedConns > 50 {
+			recommendedConns = 50
+		}
+		if conns < recommendedConns {
+			klog.Warningf("Runner %d: ConnsPerRunner (%d) may be insufficient for QPS (%.0f). "+
+				"Recommend at least %d connections.",
+				i, conns, qps, recommendedConns)
+		}
+
+		// Info: Configuration summary
+		klog.V(2).InfoS("Runner configuration",
+			"runner", i,
+			"requests", len(reqs),
+			"qps", fmt.Sprintf("%.1f", qps),
+			"connections", conns,
+			"workers", workers,
+			"ratio", fmt.Sprintf("%.1fx", float64(workers)/float64(conns)))
+	}
+
+	// Check total connection count
+	totalConns := profile.Spec.RunnerCount * profile.Spec.ConnsPerRunner
+	if totalConns > 1000 {
+		klog.Warningf("Total connections across all runners: %d. "+
+			"This may overwhelm the API server (recommend < 1000 total). "+
+			"Consider reducing connsPerRunner or using fewer runners.",
+			totalConns)
+	}
 }

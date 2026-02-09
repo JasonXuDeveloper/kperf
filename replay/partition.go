@@ -50,3 +50,41 @@ func CountByRunner(requests []types.ReplayRequest, runnerCount int) []int {
 	}
 	return counts
 }
+
+// AnalyzeDistribution returns statistics about request distribution across runners.
+func AnalyzeDistribution(requests []types.ReplayRequest, runnerCount int) map[string]interface{} {
+	counts := CountByRunner(requests, runnerCount)
+
+	total := len(requests)
+	avg := float64(total) / float64(runnerCount)
+
+	var maxCount, minCount int
+	if len(counts) > 0 {
+		maxCount = counts[0]
+		minCount = counts[0]
+	}
+
+	for _, c := range counts {
+		if c > maxCount {
+			maxCount = c
+		}
+		if c < minCount {
+			minCount = c
+		}
+	}
+
+	imbalance := 0.0
+	if avg > 0 {
+		imbalance = float64(maxCount-minCount) / avg * 100 // % imbalance
+	}
+
+	return map[string]interface{}{
+		"total":       total,
+		"runnerCount": runnerCount,
+		"average":     avg,
+		"min":         minCount,
+		"max":         maxCount,
+		"imbalance":   imbalance,
+		"perRunner":   counts,
+	}
+}

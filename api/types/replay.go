@@ -52,9 +52,8 @@ func (r ReplayRequest) Validate() error {
 		return fmt.Errorf("name is required for %s operation", r.Verb)
 	}
 
-	// Body is required for APPLY/PATCH operations
-	// CREATE can have empty body if server generates defaults
-	if (r.Verb == "APPLY" || r.Verb == "PATCH") && r.Body == "" {
+	// Body is required for CREATE/APPLY/PATCH operations
+	if (r.Verb == "CREATE" || r.Verb == "APPLY" || r.Verb == "PATCH") && r.Body == "" {
 		return fmt.Errorf("body is required for %s operation", r.Verb)
 	}
 
@@ -74,13 +73,29 @@ func (r ReplayRequest) ObjectKey() string {
 type ReplayProfileSpec struct {
 	// RunnerCount is the number of runners/partitions for distributed execution.
 	RunnerCount int `json:"runnerCount" yaml:"runnerCount"`
-	// ConnsPerRunner is the number of HTTP connections per runner.
+
+	// ConnsPerRunner is the number of HTTP connections (REST clients) per runner.
+	// Each connection maintains its own HTTP connection pool.
+	// For HTTP/2 (default), each connection can handle ~100 concurrent requests efficiently.
+	// Recommended: 5-20 for most workloads, cap at 50 per runner to avoid overwhelming API server.
 	ConnsPerRunner int `json:"connsPerRunner" yaml:"connsPerRunner"`
-	// ClientsPerRunner is the max concurrent requests per runner (0 = unlimited).
+
+	// ClientsPerRunner is the number of concurrent worker goroutines per runner.
+	// Workers pull from the request queue and execute requests using round-robin
+	// connection selection. If 0 or unspecified, defaults to ConnsPerRunner.
+	// This controls concurrency and should be tuned based on expected QPS:
+	//   - Low QPS (< 100): ClientsPerRunner = ConnsPerRunner (1 worker per conn)
+	//   - Medium QPS (100-500): ClientsPerRunner = 3x ConnsPerRunner
+	//   - High QPS (500-1000): ClientsPerRunner = 4x ConnsPerRunner
+	//   - Very High QPS (> 1000): ClientsPerRunner = 5x ConnsPerRunner, or increase runnerCount
+	// Workers are lightweight (goroutines), while connections are expensive (network resources).
 	ClientsPerRunner int `json:"clientsPerRunner" yaml:"clientsPerRunner"`
+
 	// ContentType defines response's content type (json or protobuf).
 	ContentType ContentType `json:"contentType" yaml:"contentType"`
+
 	// DisableHTTP2 means client will use HTTP/1.1 protocol if true.
+	// Default is false (use HTTP/2 for better multiplexing).
 	DisableHTTP2 bool `json:"disableHTTP2" yaml:"disableHTTP2"`
 }
 
