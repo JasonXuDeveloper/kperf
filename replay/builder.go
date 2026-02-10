@@ -132,8 +132,19 @@ func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 		req = r.restCli.Delete().AbsPath(pathParts...)
 
 	case "PATCH":
-		// Default to strategic merge patch for PATCH verb
-		req = r.restCli.Patch(apitypes.StrategicMergePatchType).AbsPath(pathParts...).Body(r.body)
+		// Choose patch type based on resource type to avoid 415 errors
+		// - Built-in resources (/api/v1) support strategic merge patch
+		// - CRDs (/apis/<custom-domain>) only support merge patch and json patch
+		patchType := apitypes.MergePatchType // Default to JSON merge patch (works for everything)
+
+		if strings.HasPrefix(r.url.Path, "/api/v1/") || strings.HasPrefix(r.url.Path, "/api/v1beta1/") {
+			// Built-in Kubernetes resources support strategic merge patch
+			patchType = apitypes.StrategicMergePatchType
+		}
+		// For CRDs (/apis/custom.domain.com/...), use MergePatchType (JSON merge patch)
+		// This is the safest option that works for all CRDs and subresources
+
+		req = r.restCli.Patch(patchType).AbsPath(pathParts...).Body(r.body)
 
 	case "APPLY":
 		// Server-side apply uses apply patch type
