@@ -393,8 +393,8 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.Replay
 			return nil
 		}
 
-		// Real error - record failure
-		respMetric.ObserveFailure(requester.Method(), requester.MaskedURL().String(), end, latency, err)
+		// Real error - record failure using actual URL (not masked) for diagnosability
+		respMetric.ObserveFailure(requester.Method(), requester.URL().String(), end, latency, err)
 		klog.V(5).Infof("Request failed: %s %s: %v", req.Verb, req.APIPath, err)
 		return err
 	}
