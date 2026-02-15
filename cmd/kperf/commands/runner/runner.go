@@ -178,6 +178,10 @@ func loadConfig(cliCtx *cli.Context) (*types.LoadProfile, error) {
 		return nil, fmt.Errorf("failed to unmarshal %s from yaml format: %w", cfgPath, err)
 	}
 
+	if len(profileCfg.Specs) == 0 {
+		return nil, fmt.Errorf("specs must be provided in config file %s", cfgPath)
+	}
+
 	// override value by flags
 	if v := "rate"; cliCtx.IsSet(v) {
 		profileCfg.Specs[0].Rate = cliCtx.Float64(v)
@@ -326,24 +330,7 @@ func buildRunnerMetricReport(stats *request.Result, includeRawData bool) types.R
 		PercentileLatenciesByURL: map[string][][2]float64{},
 	}
 
-	total := 0
-	for _, latencies := range stats.LatenciesByURL {
-		total += len(latencies)
-	}
-	latencies := make([]float64, 0, total)
-	for _, l := range stats.LatenciesByURL {
-		latencies = append(latencies, l...)
-	}
-	output.PercentileLatencies = metrics.BuildPercentileLatencies(latencies)
-
-	for u, l := range stats.LatenciesByURL {
-		output.PercentileLatenciesByURL[u] = metrics.BuildPercentileLatencies(l)
-	}
-
-	if includeRawData {
-		output.LatenciesByURL = stats.LatenciesByURL
-		output.Errors = stats.Errors
-	}
+	metrics.BuildPercentileLatenciesReport(&output, stats.LatenciesByURL, includeRawData, stats.Errors)
 
 	return output
 }
@@ -447,26 +434,7 @@ func buildReplayRunnerReport(result *replay.RunnerResult, includeRawData bool, r
 		PercentileLatenciesByURL: map[string][][2]float64{},
 	}
 
-	// Calculate total latencies
-	total := 0
-	for _, latencies := range result.ResponseStats.LatenciesByURL {
-		total += len(latencies)
-	}
-	allLatencies := make([]float64, 0, total)
-	for _, l := range result.ResponseStats.LatenciesByURL {
-		allLatencies = append(allLatencies, l...)
-	}
-	report.PercentileLatencies = metrics.BuildPercentileLatencies(allLatencies)
-
-	// Per-URL percentiles
-	for u, l := range result.ResponseStats.LatenciesByURL {
-		report.PercentileLatenciesByURL[u] = metrics.BuildPercentileLatencies(l)
-	}
-
-	if includeRawData {
-		report.LatenciesByURL = result.ResponseStats.LatenciesByURL
-		report.Errors = result.ResponseStats.Errors
-	}
+	metrics.BuildPercentileLatenciesReport(&report, result.ResponseStats.LatenciesByURL, includeRawData, result.ResponseStats.Errors)
 
 	return report
 }

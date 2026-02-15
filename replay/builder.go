@@ -14,6 +14,7 @@ import (
 
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 // ReplayRequester builds and executes replay requests using rest.Interface.
@@ -51,19 +52,21 @@ func NewReplayRequester(req types.ReplayRequest, restCli rest.Interface, baseURL
 		return nil, err
 	}
 
-	// Add label selector as query parameter for LIST/WATCH
+	// Add query parameters for LIST/WATCH
+	q := parsedURL.Query()
 	if req.LabelSelector != "" && (req.Verb == "LIST" || req.Verb == "WATCH") {
-		q := parsedURL.Query()
 		q.Set("labelSelector", req.LabelSelector)
-		if req.Verb == "WATCH" {
-			q.Set("watch", "true")
-		}
+	}
+	if req.Verb == "WATCH" {
+		q.Set("watch", "true")
+	}
+	if len(q) > 0 {
 		parsedURL.RawQuery = q.Encode()
 	}
 
 	// Create masked URL for metrics aggregation
 	maskedURL := *parsedURL
-	if req.Verb == "DELETE" || req.Verb == "PATCH" || req.Verb == "GET" || req.Verb == "CREATE" {
+	if req.Verb == "DELETE" || req.Verb == "PATCH" || req.Verb == "GET" || req.Verb == "CREATE" || req.Verb == "APPLY" {
 		// Mask the object name for aggregation
 		maskedURL.Path = maskLastPathSegment(maskedURL.Path)
 	}
@@ -117,9 +120,6 @@ func (r *ReplayRequester) Do(ctx context.Context) (int64, error) {
 	switch r.verb {
 	case "GET", "LIST", "WATCH":
 		req = r.restCli.Get().AbsPath(pathParts...)
-		if r.verb == "WATCH" {
-			req = req.Param("watch", "true")
-		}
 
 	case "CREATE":
 		req = r.restCli.Post().AbsPath(pathParts...).Body(r.body)
@@ -207,13 +207,14 @@ func verbToHTTPMethod(verb string) string {
 		return "LIST"
 	case "APPLY":
 		return "PATCH"
-	case "DELETE":
+	case "DELETE", "DELETECOLLECTION":
 		return "DELETE"
 	case "WATCH":
 		return "WATCH"
 	case "PATCH":
 		return "PATCH"
 	default:
+		klog.Warningf("Unknown verb %q, defaulting to GET", verb)
 		return "GET"
 	}
 }

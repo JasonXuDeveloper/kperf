@@ -21,6 +21,13 @@ import (
 
 const defaultRequestTimeout = 60 * time.Second
 
+// Bucket sizing QPS thresholds for adaptive timer precision.
+const (
+	bucketQPSLow    = 100  // Below this: 10ms buckets (good timing precision)
+	bucketQPSMedium = 500  // Below this: 20ms buckets
+	bucketQPSHigh   = 2000 // Below this: 50ms buckets; above: 100ms buckets
+)
+
 // timeBucket groups requests that should execute in the same time window.
 // Uses indices to avoid copying request data.
 type timeBucket struct {
@@ -76,7 +83,7 @@ func groupIntoTimeBuckets(requests []types.ReplayRequest, bucketMs int64) []time
 }
 
 // calculateBucketSize determines optimal bucket size based on request count and QPS.
-func calculateBucketSize(requests []types.ReplayRequest) int64 {
+func calculateBucketSize(requests []*types.ReplayRequest) int64 {
 	if len(requests) == 0 {
 		return 10
 	}
@@ -94,11 +101,11 @@ func calculateBucketSize(requests []types.ReplayRequest) int64 {
 	// - High QPS (500-2000): 50ms buckets
 	// - Very high QPS (>2000): 100ms buckets
 	switch {
-	case qps < 100:
+	case qps < bucketQPSLow:
 		return 10
-	case qps < 500:
+	case qps < bucketQPSMedium:
 		return 20
-	case qps < 2000:
+	case qps < bucketQPSHigh:
 		return 50
 	default:
 		return 100
@@ -182,14 +189,9 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 	// Calculate optimal bucket size based on QPS
 	var bucketMs int64
 	if len(normalReqs) > 0 {
-		// Create temporary slice view for bucket calculation
-		tempReqs := make([]types.ReplayRequest, len(normalReqs))
-		for i, req := range normalReqs {
-			tempReqs[i] = *req
-		}
-		bucketMs = calculateBucketSize(tempReqs)
+		bucketMs = calculateBucketSize(normalReqs)
 
-		duration := normalReqs[len(normalReqs)-1].Timestamp
+		duration := normalReqs[len(normalReqs)-1].Timestamp - normalReqs[0].Timestamp
 		if duration > 0 {
 			qps := float64(len(normalReqs)) / (float64(duration) / 1000.0)
 			klog.V(2).InfoS("Runner configuration",
@@ -248,10 +250,14 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 		}
 	}()
 
-	// Handle WATCH requests separately (existing approach)
+	// Handle WATCH requests separately with dedicated metrics
 	var watchWg sync.WaitGroup
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	defer cancelWatch()
+
+	watchMetrics := &workerMetrics{
+		respMetric: metrics.NewResponseMetric(),
+	}
 
 	for _, req := range watchReqs {
 		watchWg.Add(1)
@@ -271,18 +277,20 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 				}
 			}
 
-			// Execute WATCH (use first worker's metrics for simplicity)
-			_ = r.executeRequestWithClient(watchCtx, req, r.restClis[0], workers[0].respMetric)
+			_ = r.executeRequestWithClient(watchCtx, req, r.restClis[0], watchMetrics.respMetric)
 		}(req)
 	}
 
 	// Wait for all normal workers to complete
 	wg.Wait()
 
-	// Cancel WATCH operations
+	// Cancel WATCH operations and wait for them to finish
 	cancelWatch()
+	watchWg.Wait()
 
-	// Aggregate results from all workers
+	// Aggregate results from all workers (including WATCH metrics)
+	allMetrics := append(workers, watchMetrics)
+
 	totalRun := 0
 	totalFailed := 0
 	aggregatedStats := types.ResponseStats{
@@ -291,7 +299,7 @@ func (r *Runner) Run(ctx context.Context, replayStart time.Time) (*RunnerResult,
 		TotalReceivedBytes: 0,
 	}
 
-	for _, wm := range workers {
+	for _, wm := range allMetrics {
 		totalRun += wm.requestsRun
 		totalFailed += wm.requestsFailed
 
@@ -401,15 +409,6 @@ func (r *Runner) executeRequestWithClient(ctx context.Context, req *types.Replay
 
 	respMetric.ObserveLatency(requester.Method(), requester.MaskedURL().String(), reportLatency)
 	return nil
-}
-
-// executeRequest executes a single replay request (deprecated, kept for compatibility).
-func (r *Runner) executeRequest(ctx context.Context, req *types.ReplayRequest, respMetric metrics.ResponseMetric) error {
-	// Use first client for backward compatibility
-	if len(r.restClis) == 0 {
-		return fmt.Errorf("no REST clients available")
-	}
-	return r.executeRequestWithClient(ctx, req, r.restClis[0], respMetric)
 }
 
 // GetRunnerIndex returns the runner index from environment variable or parameter.

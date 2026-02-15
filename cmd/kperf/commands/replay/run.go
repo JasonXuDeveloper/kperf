@@ -131,26 +131,7 @@ func buildReplayReport(result *replay.ScheduleResult, includeRawData bool) Repla
 		TotalFailed: result.TotalFailed,
 	}
 
-	// Calculate total latencies
-	total := 0
-	for _, latencies := range result.Aggregated.LatenciesByURL {
-		total += len(latencies)
-	}
-	allLatencies := make([]float64, 0, total)
-	for _, l := range result.Aggregated.LatenciesByURL {
-		allLatencies = append(allLatencies, l...)
-	}
-	report.PercentileLatencies = metrics.BuildPercentileLatencies(allLatencies)
-
-	// Per-URL percentiles
-	for u, l := range result.Aggregated.LatenciesByURL {
-		report.PercentileLatenciesByURL[u] = metrics.BuildPercentileLatencies(l)
-	}
-
-	if includeRawData {
-		report.LatenciesByURL = result.Aggregated.LatenciesByURL
-		report.Errors = result.Aggregated.Errors
-	}
+	metrics.BuildPercentileLatenciesReport(&report.RunnerMetricReport, result.Aggregated.LatenciesByURL, includeRawData, result.Aggregated.Errors)
 
 	return report
 }

@@ -8,30 +8,23 @@ import (
 	"testing"
 
 	"github.com/Azure/kperf/api/types"
+	"github.com/stretchr/testify/assert"
+	"k8s.io/client-go/rest"
 )
 
 func TestGetRunnerIndex(t *testing.T) {
 	// Test without environment variable
-	idx := GetRunnerIndex(5)
-	if idx != 5 {
-		t.Errorf("GetRunnerIndex(5) = %d, want 5", idx)
-	}
+	assert.Equal(t, 5, GetRunnerIndex(5))
 
 	// Test with environment variable
 	os.Setenv("JOB_COMPLETION_INDEX", "3")
 	defer os.Unsetenv("JOB_COMPLETION_INDEX")
 
-	idx = GetRunnerIndex(5)
-	if idx != 3 {
-		t.Errorf("GetRunnerIndex(5) with env=3 = %d, want 3", idx)
-	}
+	assert.Equal(t, 3, GetRunnerIndex(5))
 
 	// Test with invalid environment variable
 	os.Setenv("JOB_COMPLETION_INDEX", "invalid")
-	idx = GetRunnerIndex(7)
-	if idx != 7 {
-		t.Errorf("GetRunnerIndex(7) with invalid env = %d, want 7", idx)
-	}
+	assert.Equal(t, 7, GetRunnerIndex(7))
 }
 
 func TestGroupIntoTimeBuckets(t *testing.T) {
@@ -93,52 +86,53 @@ func TestGroupIntoTimeBuckets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buckets := groupIntoTimeBuckets(tt.requests, tt.bucketMs)
-			if len(buckets) != tt.want {
-				t.Errorf("groupIntoTimeBuckets() returned %d buckets, want %d", len(buckets), tt.want)
-			}
+			assert.Equal(t, tt.want, len(buckets))
 
 			// Verify all requests are accounted for using indices
 			totalReqs := 0
 			for _, bucket := range buckets {
 				totalReqs += bucket.endIdx - bucket.startIdx
 			}
-			if totalReqs != len(tt.requests) {
-				t.Errorf("groupIntoTimeBuckets() total requests = %d, want %d", totalReqs, len(tt.requests))
-			}
+			assert.Equal(t, len(tt.requests), totalReqs, "all requests should be accounted for")
 
 			// Verify buckets are ordered
 			for i := 1; i < len(buckets); i++ {
-				if buckets[i].timestamp <= buckets[i-1].timestamp {
-					t.Errorf("buckets not ordered: bucket[%d].timestamp=%d <= bucket[%d].timestamp=%d",
-						i, buckets[i].timestamp, i-1, buckets[i-1].timestamp)
-				}
+				assert.Greater(t, buckets[i].timestamp, buckets[i-1].timestamp,
+					"buckets should be ordered by timestamp")
 			}
 
 			// Verify indices are valid and non-overlapping
 			for i, bucket := range buckets {
-				if bucket.startIdx < 0 || bucket.endIdx > len(tt.requests) || bucket.startIdx > bucket.endIdx {
-					t.Errorf("bucket[%d] has invalid indices: startIdx=%d, endIdx=%d, len=%d",
-						i, bucket.startIdx, bucket.endIdx, len(tt.requests))
-				}
+				assert.GreaterOrEqual(t, bucket.startIdx, 0, "bucket[%d] startIdx should be >= 0", i)
+				assert.LessOrEqual(t, bucket.endIdx, len(tt.requests), "bucket[%d] endIdx should be <= len(requests)", i)
+				assert.LessOrEqual(t, bucket.startIdx, bucket.endIdx, "bucket[%d] startIdx should be <= endIdx", i)
 			}
 		})
 	}
 }
 
 func TestCalculateBucketSize(t *testing.T) {
+	toPointers := func(reqs []types.ReplayRequest) []*types.ReplayRequest {
+		ptrs := make([]*types.ReplayRequest, len(reqs))
+		for i := range reqs {
+			ptrs[i] = &reqs[i]
+		}
+		return ptrs
+	}
+
 	tests := []struct {
 		name      string
-		requests  []types.ReplayRequest
+		requests  []*types.ReplayRequest
 		wantRange [2]int64 // [min, max] expected bucket size
 	}{
 		{
 			name:      "empty requests",
-			requests:  []types.ReplayRequest{},
+			requests:  []*types.ReplayRequest{},
 			wantRange: [2]int64{10, 10},
 		},
 		{
 			name: "low QPS (50 req/s)",
-			requests: func() []types.ReplayRequest {
+			requests: toPointers(func() []types.ReplayRequest {
 				reqs := make([]types.ReplayRequest, 100)
 				for i := range reqs {
 					reqs[i] = types.ReplayRequest{
@@ -149,12 +143,12 @@ func TestCalculateBucketSize(t *testing.T) {
 					}
 				}
 				return reqs
-			}(),
+			}()),
 			wantRange: [2]int64{10, 10}, // Low QPS = 10ms buckets
 		},
 		{
 			name: "medium QPS (200 req/s)",
-			requests: func() []types.ReplayRequest {
+			requests: toPointers(func() []types.ReplayRequest {
 				reqs := make([]types.ReplayRequest, 1000)
 				for i := range reqs {
 					reqs[i] = types.ReplayRequest{
@@ -165,12 +159,12 @@ func TestCalculateBucketSize(t *testing.T) {
 					}
 				}
 				return reqs
-			}(),
+			}()),
 			wantRange: [2]int64{20, 20}, // Medium QPS = 20ms buckets
 		},
 		{
 			name: "high QPS (1000 req/s)",
-			requests: func() []types.ReplayRequest {
+			requests: toPointers(func() []types.ReplayRequest {
 				reqs := make([]types.ReplayRequest, 10000)
 				for i := range reqs {
 					reqs[i] = types.ReplayRequest{
@@ -181,12 +175,12 @@ func TestCalculateBucketSize(t *testing.T) {
 					}
 				}
 				return reqs
-			}(),
+			}()),
 			wantRange: [2]int64{50, 50}, // High QPS = 50ms buckets
 		},
 		{
 			name: "very high QPS (5000 req/s)",
-			requests: func() []types.ReplayRequest {
+			requests: toPointers(func() []types.ReplayRequest {
 				reqs := make([]types.ReplayRequest, 50000)
 				for i := range reqs {
 					reqs[i] = types.ReplayRequest{
@@ -197,7 +191,7 @@ func TestCalculateBucketSize(t *testing.T) {
 					}
 				}
 				return reqs
-			}(),
+			}()),
 			wantRange: [2]int64{100, 100}, // Very high QPS = 100ms buckets
 		},
 	}
@@ -205,10 +199,7 @@ func TestCalculateBucketSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := calculateBucketSize(tt.requests)
-			if got < tt.wantRange[0] || got > tt.wantRange[1] {
-				t.Errorf("calculateBucketSize() = %d, want range [%d, %d]",
-					got, tt.wantRange[0], tt.wantRange[1])
-			}
+			assert.Equal(t, tt.wantRange[0], got)
 		})
 	}
 }
@@ -242,31 +233,12 @@ func TestNewRunner(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock REST clients (nil is fine for this test)
-			var restClis []interface{} // Using interface{} instead of rest.Interface for testing
-			for i := 0; i < tt.connsCount; i++ {
-				restClis = append(restClis, nil)
-			}
+			// Use nil rest.Interface values — safe since we don't call Run()
+			restClis := make([]rest.Interface, tt.connsCount)
 
-			// Note: This test validates the logic, but we can't easily test the full Runner
-			// without mocking the REST interface. The logic is:
-			// - If workerCount == 0, use len(restClis)
-			// - If len(restClis) == 0, use 1
-			// - Otherwise use workerCount
+			runner := NewRunner(0, nil, restClis, "https://k8s.example.com", tt.workerCount)
 
-			var expectedCount int
-			if tt.workerCount <= 0 {
-				expectedCount = tt.connsCount
-				if expectedCount == 0 {
-					expectedCount = 1
-				}
-			} else {
-				expectedCount = tt.workerCount
-			}
-
-			if expectedCount != tt.expectedWorkers {
-				t.Errorf("Expected worker count logic: got %d, want %d", expectedCount, tt.expectedWorkers)
-			}
+			assert.Equal(t, tt.expectedWorkers, runner.workerCount)
 		})
 	}
 }

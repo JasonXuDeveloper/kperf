@@ -17,6 +17,15 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// Warning thresholds for validateAndWarnConfig.
+// These are soft limits used to emit warnings, not enforced maximums.
+const (
+	warnConnsPerRunner    = 50   // Warn when connections per runner exceed this
+	warnTotalConnections  = 1000 // Warn when total connections across all runners exceed this
+	qpsPerWorkerEstimate  = 10   // Estimated QPS each worker can handle
+	qpsPerConnEstimate    = 100  // Estimated QPS each connection can handle
+)
+
 // ScheduleResult contains the aggregated result from all runners.
 type ScheduleResult struct {
 	// Per-runner results
@@ -105,21 +114,20 @@ func Schedule(ctx context.Context, kubeconfigPath string, profile *types.ReplayP
 	}
 
 	// Synchronize start time across all runners
-	replayStart := time.Now()
-	startTime := replayStart
+	startTime := time.Now()
 
 	// Run all runners concurrently
 	var wg sync.WaitGroup
 	results := make([]*RunnerResult, runnerCount)
-	errors := make([]error, runnerCount)
+	runnerErrors := make([]error, runnerCount)
 
 	for i := 0; i < runnerCount; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			result, err := runners[idx].Run(ctx, replayStart)
+			result, err := runners[idx].Run(ctx, startTime)
 			results[idx] = result
-			errors[idx] = err
+			runnerErrors[idx] = err
 		}(i)
 	}
 
@@ -127,7 +135,7 @@ func Schedule(ctx context.Context, kubeconfigPath string, profile *types.ReplayP
 	totalDuration := time.Since(startTime)
 
 	// Check for errors
-	for i, err := range errors {
+	for i, err := range runnerErrors {
 		if err != nil {
 			klog.V(2).ErrorS(err, "Runner failed", "runner", i)
 		}
@@ -244,6 +252,9 @@ func validateAndWarnConfig(profile *types.ReplayProfile, runnerRequests [][]type
 		}
 
 		duration := float64(profile.Duration()) / 1000.0 // in seconds
+		if duration <= 0 {
+			continue
+		}
 		qps := float64(len(reqs)) / duration
 
 		conns := profile.Spec.ConnsPerRunner
@@ -253,14 +264,14 @@ func validateAndWarnConfig(profile *types.ReplayProfile, runnerRequests [][]type
 		}
 
 		// Warning: Too many connections
-		if conns > 50 {
-			klog.Warningf("Runner %d: ConnsPerRunner (%d) exceeds recommended maximum (50). "+
+		if conns > warnConnsPerRunner {
+			klog.Warningf("Runner %d: ConnsPerRunner (%d) exceeds recommended maximum (%d). "+
 				"This may overwhelm the API server. Consider increasing runnerCount instead.",
-				i, conns)
+				i, conns, warnConnsPerRunner)
 		}
 
 		// Warning: Insufficient workers for QPS
-		recommendedWorkers := int(qps/10) + 10
+		recommendedWorkers := int(qps/qpsPerWorkerEstimate) + qpsPerWorkerEstimate
 		if workers < recommendedWorkers {
 			klog.Warningf("Runner %d: ClientsPerRunner (%d) may be insufficient for QPS (%.0f). "+
 				"Recommend at least %d workers (3-4x connections).",
@@ -268,9 +279,9 @@ func validateAndWarnConfig(profile *types.ReplayProfile, runnerRequests [][]type
 		}
 
 		// Warning: Too few connections for QPS
-		recommendedConns := int(qps/100) + 5
-		if recommendedConns > 50 {
-			recommendedConns = 50
+		recommendedConns := int(qps/qpsPerConnEstimate) + 5
+		if recommendedConns > warnConnsPerRunner {
+			recommendedConns = warnConnsPerRunner
 		}
 		if conns < recommendedConns {
 			klog.Warningf("Runner %d: ConnsPerRunner (%d) may be insufficient for QPS (%.0f). "+
@@ -290,10 +301,10 @@ func validateAndWarnConfig(profile *types.ReplayProfile, runnerRequests [][]type
 
 	// Check total connection count
 	totalConns := profile.Spec.RunnerCount * profile.Spec.ConnsPerRunner
-	if totalConns > 1000 {
+	if totalConns > warnTotalConnections {
 		klog.Warningf("Total connections across all runners: %d. "+
-			"This may overwhelm the API server (recommend < 1000 total). "+
+			"This may overwhelm the API server (recommend < %d total). "+
 			"Consider reducing connsPerRunner or using fewer runners.",
-			totalConns)
+			totalConns, warnTotalConnections)
 	}
 }

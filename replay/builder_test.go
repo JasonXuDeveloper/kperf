@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/Azure/kperf/api/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVerbToHTTPMethod(t *testing.T) {
@@ -19,6 +21,7 @@ func TestVerbToHTTPMethod(t *testing.T) {
 		{"LIST", "LIST"},
 		{"APPLY", "PATCH"},
 		{"DELETE", "DELETE"},
+		{"DELETECOLLECTION", "DELETE"},
 		{"WATCH", "WATCH"},
 		{"PATCH", "PATCH"},
 		{"UNKNOWN", "GET"}, // default
@@ -27,9 +30,7 @@ func TestVerbToHTTPMethod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.verb, func(t *testing.T) {
 			got := verbToHTTPMethod(tt.verb)
-			if got != tt.want {
-				t.Errorf("verbToHTTPMethod(%s) = %s, want %s", tt.verb, got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -50,16 +51,12 @@ func TestMaskLastPathSegment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			got := maskLastPathSegment(tt.path)
-			if got != tt.want {
-				t.Errorf("maskLastPathSegment(%s) = %s, want %s", tt.path, got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
 
 func TestNewReplayRequesterURLBuilding(t *testing.T) {
-	// We can't easily test with a real rest.Interface without a running cluster,
-	// but we can test the URL building logic by checking the requester fields
 	tests := []struct {
 		name       string
 		req        types.ReplayRequest
@@ -118,24 +115,128 @@ func TestNewReplayRequesterURLBuilding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// We pass nil for restCli since we're only testing URL building
-			// The actual request execution would need a real client
 			requester, err := NewReplayRequester(tt.req, nil, tt.baseURL)
-			if err != nil {
-				t.Fatalf("NewReplayRequester() error = %v", err)
-			}
+			require.NoError(t, err)
 
-			if requester.Method() != tt.wantMethod {
-				t.Errorf("Method() = %s, want %s", requester.Method(), tt.wantMethod)
-			}
+			assert.Equal(t, tt.wantMethod, requester.Method())
 
-			// Check URL is properly constructed
 			expectedURL := tt.baseURL + tt.req.APIPath
-			if requester.URL().String() != expectedURL {
-				t.Errorf("URL() = %s, want %s", requester.URL().String(), expectedURL)
-			}
+			assert.Equal(t, expectedURL, requester.URL().String())
 		})
 	}
+}
+
+func TestNewReplayRequesterPATCH(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiPath    string
+		wantMethod string
+	}{
+		{
+			name:       "PATCH built-in resource",
+			apiPath:    "/api/v1/namespaces/default/pods/nginx",
+			wantMethod: "PATCH",
+		},
+		{
+			name:       "PATCH CRD resource",
+			apiPath:    "/apis/custom.example.com/v1/namespaces/default/widgets/widget-1",
+			wantMethod: "PATCH",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := types.ReplayRequest{
+				Verb:         "PATCH",
+				Namespace:    "default",
+				ResourceKind: "Pod",
+				Name:         "nginx",
+				APIPath:      tt.apiPath,
+				Body:         `{"metadata":{"labels":{"app":"test"}}}`,
+			}
+			requester, err := NewReplayRequester(req, nil, "https://k8s.example.com")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantMethod, requester.Method())
+		})
+	}
+}
+
+func TestNewReplayRequesterWATCHWithLabelSelector(t *testing.T) {
+	req := types.ReplayRequest{
+		Verb:          "WATCH",
+		Namespace:     "default",
+		ResourceKind:  "Pod",
+		APIPath:       "/api/v1/namespaces/default/pods",
+		LabelSelector: "app=nginx",
+	}
+	requester, err := NewReplayRequester(req, nil, "https://k8s.example.com")
+	require.NoError(t, err)
+
+	assert.Equal(t, "WATCH", requester.Method())
+
+	q := requester.URL().Query()
+	assert.Equal(t, "true", q.Get("watch"))
+	assert.Equal(t, "app=nginx", q.Get("labelSelector"))
+}
+
+func TestNewReplayRequesterWATCHWithoutLabelSelector(t *testing.T) {
+	req := types.ReplayRequest{
+		Verb:         "WATCH",
+		Namespace:    "default",
+		ResourceKind: "Pod",
+		APIPath:      "/api/v1/namespaces/default/pods",
+	}
+	requester, err := NewReplayRequester(req, nil, "https://k8s.example.com")
+	require.NoError(t, err)
+
+	// watch=true should still be set even without labelSelector
+	q := requester.URL().Query()
+	assert.Equal(t, "true", q.Get("watch"))
+}
+
+func TestNewReplayRequesterDELETECOLLECTION(t *testing.T) {
+	req := types.ReplayRequest{
+		Verb:         "DELETECOLLECTION",
+		Namespace:    "default",
+		ResourceKind: "Pod",
+		APIPath:      "/api/v1/namespaces/default/pods",
+	}
+	requester, err := NewReplayRequester(req, nil, "https://k8s.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "DELETE", requester.Method())
+}
+
+func TestNewReplayRequesterAPPLY(t *testing.T) {
+	req := types.ReplayRequest{
+		Verb:         "APPLY",
+		Namespace:    "default",
+		ResourceKind: "Deployment",
+		Name:         "nginx",
+		APIPath:      "/apis/apps/v1/namespaces/default/deployments/nginx",
+		Body:         `{"apiVersion":"apps/v1","kind":"Deployment"}`,
+	}
+	requester, err := NewReplayRequester(req, nil, "https://k8s.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "PATCH", requester.Method())
+
+	// APPLY should mask the object name for metrics aggregation
+	assert.Contains(t, requester.MaskedURL().Path, ":name")
+}
+
+func TestNewReplayRequesterMalformedURL(t *testing.T) {
+	// Test that & is replaced with ? when no ? is present
+	req := types.ReplayRequest{
+		Verb:         "LIST",
+		Namespace:    "default",
+		ResourceKind: "Pod",
+		APIPath:      "/api/v1/namespaces/default/pods&limit=100&continue=abc",
+	}
+	requester, err := NewReplayRequester(req, nil, "https://k8s.example.com")
+	require.NoError(t, err)
+
+	q := requester.URL().Query()
+	assert.Equal(t, "100", q.Get("limit"))
+	assert.Equal(t, "abc", q.Get("continue"))
 }
 
 func TestHTTPError(t *testing.T) {
@@ -144,7 +245,5 @@ func TestHTTPError(t *testing.T) {
 		Status:     "404 Not Found",
 	}
 
-	if err.Error() != "404 Not Found" {
-		t.Errorf("Error() = %s, want '404 Not Found'", err.Error())
-	}
+	assert.Equal(t, "404 Not Found", err.Error())
 }
